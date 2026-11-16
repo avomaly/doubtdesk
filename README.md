@@ -43,17 +43,13 @@ Requirements: Node.js 20+ and a Nexconn app in the Singapore data center.
    npm run build
    ```
 
-4. Start the API and frontend in separate terminals:
+4. Start the API and frontend together:
 
    ```sh
-   node --env-file=.env --env-file=.env.server server.mjs
+   npm run dev:all
    ```
 
-   ```sh
-   npm run dev
-   ```
-
-5. Open the Vite URL, sign in with a display name, create a subject room or join a room code, then post a doubt.
+5. Open `http://127.0.0.1:5173`, sign in with a display name, create a subject room or join a room code, then post a doubt.
 
 Gemini defaults to `gemini-3.5-flash-lite`; set `GEMINI_MODEL` in `.env.server` to use another model. The backend retries transient 429/503 responses and timeouts with `gemini-3.6-flash`. Answers are limited to 110 words and include a reminder to confirm with a senior or teacher. AI failure never prevents the doubt from being posted.
 

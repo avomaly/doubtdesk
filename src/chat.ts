@@ -9,27 +9,58 @@ export type RoomMessage = {
   setMetadata: (metadata: Record<string, string>) => Promise<{ code: number }>;
 };
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8787' : '');
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
 async function postAPI(path: string, payload: Record<string, unknown>, sessionToken?: string) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-    },
-    body: JSON.stringify(payload),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error(
+      import.meta.env.DEV
+        ? "Can't reach the DoubtDesk API. Start everything with `npm run dev:all`."
+        : "Can't reach the DoubtDesk API. Check your connection and try again.",
+    );
+  }
   const body = await res.json().catch(() => null);
   if (!res.ok) {
-    const message =
+    const apiMessage =
       body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
         ? body.error
         : `Request failed (${res.status})`;
+    const message =
+      res.status === 401
+        ? 'Your sign-in expired. Sign in again and retry.'
+        : res.status === 403
+          ? 'The API rejected this origin. Check CORS_ORIGIN on the server.'
+          : res.status === 429
+            ? 'Too many requests. Wait a minute and try again.'
+            : path === '/api/rooms/create'
+              ? `Could not create the room: ${apiMessage}. Check the room code is unused and your invitee IDs are valid.`
+              : path === '/api/login' && apiMessage.includes('not configured')
+                ? 'Login is not configured. Set NEXCONN_APP_KEY and NEXCONN_APP_SECRET in .env.server, then restart.'
+                : apiMessage;
     throw new Error(message);
   }
   return body;
+}
+
+export async function checkAPI(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/api/health`, {
+      signal: AbortSignal.timeout(2500),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function loginUser(
@@ -62,12 +93,12 @@ export async function createRoom(
 
 export async function joinRoom(groupId: string) {
   const { code } = await new GroupChannel(groupId).join();
-  if (code !== 0) throw new Error(`Join failed. Code: ${code}`);
+  if (code !== 0 && code !== 25412) throw new Error(`Join failed. Code: ${code}`);
 }
 
 export async function fetchRoomMessages(
   groupId: string,
-  startTime = Date.now(),
+  startTime = 0,
 ): Promise<RoomMessage[]> {
   const channel = new GroupChannel(groupId);
   const query = BaseChannel.createMessagesQuery({
@@ -77,7 +108,10 @@ export async function fetchRoomMessages(
     isAscending: false,
   });
   const { code, data } = await query.loadNextPage();
-  if (code !== 0) throw new Error(`Load messages failed. Code: ${code}`);
+  if (code === 22406) {
+    throw new Error('You are not a member of this room. Ask for an invitation or check the room code.');
+  }
+  if (code !== 0) throw new Error(`Could not load room history. Code: ${code}`);
   const list: RoomMessage[] = Array.isArray(data)
     ? data as RoomMessage[]
     : (data as { data?: RoomMessage[] })?.data ?? [];

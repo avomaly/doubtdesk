@@ -1,19 +1,48 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowUpRight,
+  BookOpen,
+  ChevronRight,
+  DoorOpen,
+  LayoutDashboard,
+  Library,
+  Moon,
+  NotebookPen,
+  Plus,
+  Search,
+  Sun,
+  X,
+} from 'lucide-react';
 import './App.css';
 import { connectUser, onActivity } from './nexconn';
 import {
-  loginUser, createRoom, joinRoom, fetchRoomMessages, postDoubt, postReply,
+  checkAPI, loginUser, createRoom, joinRoom, fetchRoomMessages, postDoubt, postReply,
   postAIReply, askAI, markSolved, textOf, metaOf,
   type RoomMessage,
 } from './chat';
 
 type RoomEntry = { id: string; name: string };
+type PageKey = 'dashboard' | 'rooms' | 'my-doubts' | 'answer-bank' | 'room';
+type DoubtEntry = {
+  doubt: RoomMessage;
+  room: RoomEntry;
+  replies: RoomMessage[];
+};
 
-const PRESET_ROOMS: RoomEntry[] = [
-  { id: 'physics26', name: 'Physics 101' },
-  { id: 'chemistry26', name: 'Chemistry 101' },
-  { id: 'calculus26', name: 'Calculus 101' },
+const PRESET_SUBJECTS = [
+  { name: 'Physics 101', code: 'physics101' },
+  { name: 'Chemistry 101', code: 'chemistry101' },
+  { name: 'Calculus 101', code: 'calculus101' },
 ];
+
+const PRIMARY_NAV = [
+  { key: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
+  { key: 'rooms' as const, label: 'Rooms', icon: DoorOpen },
+  { key: 'my-doubts' as const, label: 'My doubts', icon: NotebookPen },
+  { key: 'answer-bank' as const, label: 'Answer bank', icon: Library },
+];
+
+const AI_NOTE = 'Check with a senior or your teacher.';
 
 function readRooms(): RoomEntry[] {
   try {
@@ -54,17 +83,25 @@ function mergeMessages(...pages: RoomMessage[][]) {
   return [...messages.values()].sort((left, right) => left.sentTime - right.sentTime);
 }
 
-export default function App() {
+function aiText(text: string) {
+  return text
+    .replace(/\s*\n*\(AI answer - confirm with your seniors or teacher\.\)$/i, '')
+    .replace(/\s*\n*Check with a senior or your teacher\.$/i, '');
+}
+
+function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => localStorage.getItem('doubtdesk.theme') === 'dark' ? 'dark' : 'light',
   );
   const [displayName, setDisplayName] = useState(
     () => sessionStorage.getItem('doubtdesk.name') ?? '',
   );
+  const [apiReachable, setApiReachable] = useState(true);
   const [authenticating, setAuthenticating] = useState(false);
+  const [roomWorking, setRoomWorking] = useState(false);
   const [me, setMe] = useState('');
   const [apiSession, setApiSession] = useState('');
-  const [status, setStatus] = useState('Not connected');
+  const [notice, setNotice] = useState('');
   const [aiStatus, setAiStatus] = useState('');
   const [roomInput, setRoomInput] = useState('');
   const [roomName, setRoomName] = useState('');
@@ -74,69 +111,147 @@ export default function App() {
   );
   const [rooms, setRooms] = useState<RoomEntry[]>(readRooms);
   const [room, setRoom] = useState('');
-  const [msgs, setMsgs] = useState<RoomMessage[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadingMessages, setLoadingMessages] = useState(false);
-  const [roomError, setRoomError] = useState('');
-  const [sending, setSending] = useState(false);
-  const [solvingMessage, setSolvingMessage] = useState<string | null>(null);
+  const [page, setPage] = useState<PageKey>('dashboard');
+  const [messagesByRoom, setMessagesByRoom] = useState<Record<string, RoomMessage[]>>({});
+  const [historyErrors, setHistoryErrors] = useState<Record<string, string>>({});
+  const [loadingRooms, setLoadingRooms] = useState<Set<string>>(new Set());
+  const [hasMoreByRoom, setHasMoreByRoom] = useState<Record<string, boolean>>({});
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [view, setView] = useState<'open' | 'solved'>('open');
   const [searchTerm, setSearchTerm] = useState('');
+  const [globalSearch, setGlobalSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [text, setText] = useState('');
   const [replyTo, setReplyTo] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const messageRoom = useRef('');
+  const [sending, setSending] = useState(false);
+  const [solvingMessage, setSolvingMessage] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  function rememberRoom(entry: RoomEntry) {
+  useEffect(() => {
+    let active = true;
+    const check = async () => {
+      const reachable = await checkAPI();
+      if (active) setApiReachable(reachable);
+    };
+    void check();
+    const interval = window.setInterval(() => { void check(); }, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+      if (event.key === 'Escape') setSearchOpen(false);
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  const rememberRoom = useCallback((entry: RoomEntry) => {
     setRooms((current) => {
       const next = [entry, ...current.filter((item) => item.id !== entry.id)];
       sessionStorage.setItem('doubtdesk.rooms', JSON.stringify(next));
       return next;
     });
-  }
+  }, []);
 
-  const refresh = useCallback(async () => {
-    if (!room) {
-      setMsgs([]);
-      return;
-    }
-    setLoadingMessages(true);
-    setRoomError('');
+  const refreshRoom = useCallback(async (id: string) => {
+    setLoadingRooms((current) => new Set(current).add(id));
     try {
-      const latest = await fetchRoomMessages(room);
-      if (messageRoom.current === room) {
-        setMsgs((current) => mergeMessages(current, latest));
-      } else {
-        setMsgs(latest);
-        messageRoom.current = room;
-      }
-      setHasMore(latest.length >= 50);
-    } catch (e) {
-      setRoomError((e as Error).message);
+      const latest = await fetchRoomMessages(id);
+      setMessagesByRoom((current) => ({
+        ...current,
+        [id]: mergeMessages(current[id] ?? [], latest),
+      }));
+      setHasMoreByRoom((current) => ({ ...current, [id]: latest.length >= 50 }));
+      setHistoryErrors((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    } catch (error) {
+      setHistoryErrors((current) => ({
+        ...current,
+        [id]: error instanceof Error ? error.message : 'Could not load this room history.',
+      }));
     } finally {
-      setLoadingMessages(false);
+      setLoadingRooms((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
-  }, [room]);
+  }, []);
+
+  const refreshAllRooms = useCallback(async () => {
+    await Promise.all(rooms.map((entry) => refreshRoom(entry.id)));
+  }, [refreshRoom, rooms]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => { void refresh(); }, 0);
-    const unsubscribe = onActivity(() => { void refresh(); });
-    return () => {
-      window.clearTimeout(timer);
-      unsubscribe();
-    };
-  }, [refresh]);
+    if (!me) return;
+    void refreshAllRooms();
+    return onActivity(() => { void refreshAllRooms(); });
+  }, [me, refreshAllRooms]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [msgs, view]);
+  const roomEntries = useMemo(
+    () => rooms.map((entry) => ({ ...entry, messages: messagesByRoom[entry.id] ?? [] })),
+    [messagesByRoom, rooms],
+  );
+  const doubtEntries = useMemo<DoubtEntry[]>(() => roomEntries.flatMap((entry) => {
+    const doubts = entry.messages.filter((message) => metaOf(message).kind === 'doubt');
+    return doubts.map((doubt) => ({
+      doubt,
+      room: { id: entry.id, name: entry.name },
+      replies: entry.messages.filter(
+        (message) => metaOf(message).kind === 'reply' && metaOf(message).replyTo === doubt.messageId,
+      ),
+    }));
+  }).sort((left, right) => right.doubt.sentTime - left.doubt.sentTime), [roomEntries]);
+  const activeRoom = rooms.find((entry) => entry.id === room);
+  const activeEntries = doubtEntries.filter((entry) => entry.room.id === room);
+  const myDoubts = doubtEntries.filter((entry) => entry.doubt.senderUserId === me);
+  const openDoubts = doubtEntries.filter((entry) => metaOf(entry.doubt).status !== 'solved');
+  const solvedDoubts = doubtEntries.filter((entry) => metaOf(entry.doubt).status === 'solved');
+  const needsAnswer = openDoubts.filter(
+    (entry) => !entry.replies.some((reply) => metaOf(reply).author !== 'ai'),
+  );
+  const filteredRoomEntries = activeEntries.filter(
+    (entry) => (metaOf(entry.doubt).status === 'solved') === (view === 'solved'),
+  );
+  const filteredMyDoubts = myDoubts.filter(
+    (entry) => (metaOf(entry.doubt).status === 'solved') === (view === 'solved'),
+  );
+  const normalizedSearch = searchTerm.trim().toLocaleLowerCase();
+  const filteredAnswers = solvedDoubts.filter((entry) =>
+    !normalizedSearch ||
+    [entry.doubt, ...entry.replies].some((message) =>
+      textOf(message).toLocaleLowerCase().includes(normalizedSearch),
+    ),
+  );
+  const normalizedGlobalSearch = globalSearch.trim().toLocaleLowerCase();
+  const globalResults = doubtEntries.filter((entry) =>
+    normalizedGlobalSearch &&
+    [entry.doubt, ...entry.replies].some((message) =>
+      textOf(message).toLocaleLowerCase().includes(normalizedGlobalSearch),
+    ),
+  ).slice(0, 8);
 
-  async function run(fn: () => Promise<unknown>) {
+  async function run(action: () => Promise<unknown>) {
     try {
-      await fn();
-    } catch (e) {
-      setStatus((e as Error).message);
+      await action();
+      setNotice('');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Something went wrong. Try again.');
     }
   }
 
@@ -145,76 +260,93 @@ export default function App() {
     if (!name) throw new Error('Enter a display name to continue.');
     if (authenticating) return;
     setAuthenticating(true);
-    setStatus('Signing in...');
     try {
       const { userId, accessToken, sessionToken } = await loginUser(name);
       const id = await connectUser(accessToken);
-      if (id !== userId) throw new Error('Nexconn connected with an unexpected user ID');
+      if (id !== userId) throw new Error('Could not confirm your Nexconn account. Sign in again.');
       sessionStorage.setItem('doubtdesk.name', name);
       setApiSession(sessionToken);
       setMe(id);
-      setStatus(`Connected as ${id}`);
       const sharedCode = roomCodeFrom(joinCode);
       if (sharedCode) {
         await joinRoom(sharedCode);
         rememberRoom({ id: sharedCode, name: sharedCode });
         setRoom(sharedCode);
+        setPage('room');
       }
     } finally {
       setAuthenticating(false);
     }
   });
 
-  const create = () =>
-    run(async () => {
-      const id = roomInput.trim();
-      const label = roomName.trim() || id;
-      const list = invitees.split(',').map((s) => s.trim()).filter(Boolean);
+  const create = () => run(async () => {
+    const id = roomInput.trim();
+    const label = roomName.trim() || id;
+    const list = invitees.split(',').map((item) => item.trim()).filter(Boolean);
+    if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
+      throw new Error('Use a room code with 1–64 letters or numbers.');
+    }
+    setRoomWorking(true);
+    try {
       await createRoom(id, label, list, apiSession);
       rememberRoom({ id, name: label });
       setRoom(id);
-    });
+      setPage('room');
+      setView('open');
+    } finally {
+      setRoomWorking(false);
+    }
+  });
 
-  const join = () =>
-    run(async () => {
-      const id = roomCodeFrom(joinCode);
-      if (!/^[A-Za-z0-9]{1,64}$/.test(id)) throw new Error('Enter a valid room code or invite link.');
+  const join = () => run(async () => {
+    const id = roomCodeFrom(joinCode);
+    if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
+      throw new Error('Enter a room code with 1–64 letters or numbers.');
+    }
+    setRoomWorking(true);
+    try {
       await joinRoom(id);
-      rememberRoom({ id, name: id });
+      const existing = rooms.find((entry) => entry.id === id);
+      rememberRoom(existing ?? { id, name: id });
       setRoom(id);
-    });
+      setPage('room');
+      setView('open');
+    } finally {
+      setRoomWorking(false);
+    }
+  });
 
   async function askBot(doubtId: string, question: string) {
-    setAiStatus('🤖 AI is answering...');
+    setAiStatus('AI is drafting a first answer.');
     try {
       const answer = await askAI(question);
       await postAIReply(room, doubtId, answer);
-      await refresh();
+      await refreshRoom(room);
       setAiStatus('');
-    } catch (e) {
-      console.error('AI answer failed:', e);
-      setAiStatus("AI couldn't answer, a senior will help.");
+    } catch (error) {
+      console.error('AI answer failed:', error);
+      setAiStatus("AI couldn't answer. A senior can help.");
     }
   }
 
   const submit = () => {
     if (sending || !room) return;
     return run(async () => {
-      const q = text.trim();
-      if (!q) return;
+      const question = text.trim();
+      if (!question) return;
       setSending(true);
       try {
         if (replyTo) {
-          await postReply(room, replyTo, q);
+          await postReply(room, replyTo, question);
           setText('');
           setReplyTo(null);
-          await refresh();
+          await refreshRoom(room);
           return;
         }
-        const doubt = await postDoubt(room, q);
+        const doubt = await postDoubt(room, question);
         setText('');
-        await refresh();
-        void askBot(doubt.messageId, q);
+        await refreshRoom(room);
+        void askBot(doubt.messageId, question);
       } finally {
         setSending(false);
       }
@@ -227,75 +359,177 @@ export default function App() {
       setSolvingMessage(message.messageId);
       try {
         await markSolved(message);
-        await refresh();
+        await refreshRoom(room);
       } finally {
         setSolvingMessage(null);
       }
     });
   };
 
-  const loadMore = () => run(async () => {
-    if (!room || messageRoom.current !== room || !msgs.length || loadingMore || !hasMore) return;
-    setLoadingMore(true);
+  const loadOlder = () => run(async () => {
+    const targets = page === 'room' && room
+      ? [room]
+      : rooms.filter((entry) => hasMoreByRoom[entry.id]).map((entry) => entry.id);
+    if (!targets.length || loadingOlder) return;
+    setLoadingOlder(true);
     try {
-      const older = await fetchRoomMessages(room, msgs[0].sentTime - 1);
-      setMsgs((current) => mergeMessages(older, current));
-      setHasMore(older.length >= 50);
+      await Promise.all(targets.map(async (id) => {
+        const current = messagesByRoom[id] ?? [];
+        if (!current.length) return;
+        const older = await fetchRoomMessages(id, current[0].sentTime - 1);
+        setMessagesByRoom((cached) => ({
+          ...cached,
+          [id]: mergeMessages(older, cached[id] ?? []),
+        }));
+        setHasMoreByRoom((cached) => ({ ...cached, [id]: older.length >= 50 }));
+      }));
     } finally {
-      setLoadingMore(false);
+      setLoadingOlder(false);
     }
   });
 
-  const doubts = msgs.filter((message) => metaOf(message).kind === 'doubt');
-  const repliesOf = (id: string) =>
-    msgs.filter((message) => metaOf(message).kind === 'reply' && metaOf(message).replyTo === id);
-  const statusDoubts = doubts.filter(
-    (message) => (metaOf(message).status === 'solved') === (view === 'solved'),
-  );
-  const normalizedSearch = searchTerm.trim().toLocaleLowerCase();
-  const visibleDoubts = statusDoubts.filter((doubt) => {
-    if (view !== 'solved' || !normalizedSearch) return true;
-    return [doubt, ...repliesOf(doubt.messageId)].some((message) =>
-      textOf(message).toLocaleLowerCase().includes(normalizedSearch),
+  function openRoom(id: string) {
+    setRoom(id);
+    setPage('room');
+    setView('open');
+  }
+
+  function selectNavigation(next: PageKey) {
+    setPage(next);
+    setNotice('');
+  }
+
+  function openSearchResult(entry: DoubtEntry) {
+    setRoom(entry.room.id);
+    setPage('room');
+    setView(metaOf(entry.doubt).status === 'solved' ? 'solved' : 'open');
+    setSearchTerm(globalSearch);
+    setSearchOpen(false);
+  }
+
+  const currentTitle = page === 'room'
+    ? activeRoom?.name ?? room
+    : PRIMARY_NAV.find((item) => item.key === page)?.label ?? 'Dashboard';
+  const hasOlder = page === 'room'
+    ? Boolean(hasMoreByRoom[room])
+    : rooms.some((entry) => hasMoreByRoom[entry.id]);
+
+  function renderDoubt(entry: DoubtEntry, showRoom = false) {
+    const metadata = metaOf(entry.doubt);
+    const solved = metadata.status === 'solved';
+    return (
+      <article className="doubt-entry" key={entry.doubt.messageId}>
+        <div className="doubt-meta">
+          <div className="doubt-meta-left">
+            <span className={solved ? 'status-label is-solved' : 'status-label'}>
+              {solved ? 'SOLVED' : 'OPEN'}
+            </span>
+            <span>{entry.doubt.senderUserId === me ? 'You' : entry.doubt.senderUserId}</span>
+          </div>
+          <time dateTime={new Date(entry.doubt.sentTime).toISOString()}>
+            {formatTime(entry.doubt.sentTime)}
+          </time>
+        </div>
+        <h3 className="doubt-title">{textOf(entry.doubt)}</h3>
+        {showRoom && (
+          <button className="room-context" onClick={() => openRoom(entry.room.id)}>
+            {entry.room.name}<ArrowUpRight size={13} strokeWidth={1.5} />
+          </button>
+        )}
+        {entry.replies.length > 0 ? (
+          <div className="reply-list">
+            {entry.replies.map((reply) => {
+              const isAI = metaOf(reply).author === 'ai';
+              return (
+                <article className={isAI ? 'reply-entry ai-reply' : 'reply-entry'} key={reply.messageId}>
+                  <div className="reply-meta">
+                    <strong>
+                      {isAI ? 'DoubtDesk AI' : reply.senderUserId === me ? 'You' : reply.senderUserId}
+                    </strong>
+                    {isAI && <span className="ai-badge">AI DRAFT</span>}
+                    <time dateTime={new Date(reply.sentTime).toISOString()}>
+                      {formatTime(reply.sentTime)}
+                    </time>
+                  </div>
+                  <p>{isAI ? aiText(textOf(reply)) : textOf(reply)}</p>
+                  {isAI && <p className="ai-note">{AI_NOTE}</p>}
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="no-replies">No replies yet.</p>
+        )}
+        <div className="doubt-actions">
+          <button className="text-action" onClick={() => setReplyTo(entry.doubt.messageId)} disabled={sending}>
+            Reply
+          </button>
+          {!solved && entry.doubt.senderUserId === me && (
+            <button
+              className="text-action"
+              onClick={() => void solve(entry.doubt)}
+              disabled={solvingMessage !== null}
+            >
+              {solvingMessage === entry.doubt.messageId ? 'Saving…' : 'Mark solved'}
+            </button>
+          )}
+        </div>
+      </article>
     );
-  });
+  }
+
+  function renderStatusTabs(entries: DoubtEntry[]) {
+    const openCount = entries.filter((entry) => metaOf(entry.doubt).status !== 'solved').length;
+    const solvedCount = entries.length - openCount;
+    return (
+      <div className="status-tabs" role="tablist" aria-label="Doubt status">
+        <button
+          className={view === 'open' ? 'status-tab active' : 'status-tab'}
+          role="tab"
+          aria-selected={view === 'open'}
+          onClick={() => setView('open')}
+        >
+          Open <span>{openCount}</span>
+        </button>
+        <button
+          className={view === 'solved' ? 'status-tab active' : 'status-tab'}
+          role="tab"
+          aria-selected={view === 'solved'}
+          onClick={() => setView('solved')}
+        >
+          Solved <span>{solvedCount}</span>
+        </button>
+      </div>
+    );
+  }
+
+  function renderEmpty(title: string, detail: string) {
+    return (
+      <div className="empty-state">
+        <h3>{title}</h3>
+        <p>{detail}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="app" data-theme={theme}>
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true">?</span>
-            <div>
-              <h1>DoubtDesk</h1>
-              <p>Questions that find an answer.</p>
-            </div>
+      {!me ? (
+        <main className="login-page">
+          <div className="login-brand">
+            <NotebookPen size={19} strokeWidth={1.5} />
+            <span>DoubtDesk</span>
           </div>
-          <div className="header-actions">
-            {me && <span className="identity">Connected as {me}</span>}
-            <button
-              className="theme-toggle"
-              onClick={() => {
-                const next = theme === 'light' ? 'dark' : 'light';
-                localStorage.setItem('doubtdesk.theme', next);
-                setTheme(next);
-              }}
-              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
-              aria-pressed={theme === 'dark'}
-            >
-              {theme === 'light' ? '☾ Dark' : '☀ Light'}
-            </button>
-          </div>
-        </header>
-
-        <p className="app-status" role="status">{status}</p>
-        {aiStatus && <p className="ai-status" role="status">{aiStatus}</p>}
-
-        {!me ? (
-          <main className="welcome-panel">
-            <span className="eyebrow">YOUR CAMPUS, ONE ANSWER CLOSER</span>
-            <h2>Good questions deserve better than a busy group chat.</h2>
-            <p>Sign in with a display name to ask, discuss, and save answers with your classmates.</p>
+          <section className="login-panel">
+            <p className="section-kicker">STUDY ROOMS</p>
+            <h1>Sign in</h1>
+            <p className="login-description">Use a display name your classmates recognize.</p>
+            {notice && <p className="notice" role="alert">{notice}</p>}
+            {!apiReachable && (
+              <p className="api-banner" role="alert">
+                <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
+              </p>
+            )}
             <form
               className="login-form"
               onSubmit={(event) => {
@@ -304,243 +538,488 @@ export default function App() {
               }}
             >
               <label htmlFor="display-name">Display name</label>
-              <div className="login-controls">
-                <input
-                  id="display-name"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="e.g. Maya"
-                  maxLength={40}
-                  autoComplete="nickname"
-                />
-                <button type="submit" disabled={authenticating}>
-                  {authenticating ? 'Signing in…' : 'Continue'}
-                </button>
-              </div>
-              <small>No password needed for the demo.</small>
+              <input
+                id="display-name"
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                placeholder="e.g. Maya"
+                maxLength={40}
+                autoComplete="nickname"
+                required
+              />
+              <button className="primary-button" type="submit" disabled={authenticating}>
+                {authenticating ? 'Signing in…' : 'Continue'}
+              </button>
             </form>
-          </main>
-        ) : (
-        <div className="workspace">
-          <aside className="sidebar">
-            <section>
-              <h3>Subject rooms</h3>
-              <div className="room-list">
-                {rooms.map((entry) => (
-                  <button
-                    className={entry.id === room ? 'room-link active' : 'room-link'}
-                    key={entry.id}
-                    onClick={() => setRoom(entry.id)}
-                  >
-                    <span>{entry.name}</span>
-                    <small>{entry.id}</small>
-                  </button>
-                ))}
-                {rooms.length === 0 && <p className="muted">Your rooms will appear here.</p>}
-              </div>
-            </section>
-
-            <section className="room-tools">
-              <h3>Create a room</h3>
-              <input
-                value={roomName}
-                onChange={(e) => setRoomName(e.target.value)}
-                placeholder="Subject name"
-                maxLength={64}
-              />
-              <input
-                value={roomInput}
-                onChange={(e) => setRoomInput(e.target.value)}
-                placeholder="Room code (letters/numbers)"
-                maxLength={64}
-              />
-              <input
-                value={invitees}
-                onChange={(e) => setInvitees(e.target.value)}
-                placeholder="Invitee IDs (optional, comma separated)"
-              />
-              <div className="preset-list">
-                {PRESET_ROOMS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    className="preset"
-                    onClick={() => {
-                      setRoomName(preset.name);
-                      setRoomInput(preset.id);
-                    }}
-                  >
-                    {preset.name}
-                  </button>
-                ))}
-              </div>
-              <button onClick={create}>Create room</button>
-            </section>
-
-            <section className="room-tools">
-              <h3>Join by code</h3>
-              <input
-                value={joinCode}
-                onChange={(e) => setJoinCode(e.target.value)}
-                placeholder="Paste a room code or invite link"
-              />
-              <button onClick={join}>Join room</button>
-            </section>
-          </aside>
-
-          <main className="room-main">
-            <header className="room-header">
-              <div>
-                <h3>{rooms.find((entry) => entry.id === room)?.name ?? (room || 'Choose a room')}</h3>
-                {room && <small>Room code: {room}</small>}
-              </div>
-              {room && (
-                <button
-                  onClick={() => {
-                    const link = new URL(window.location.href);
-                    link.searchParams.set('room', room);
-                    void navigator.clipboard.writeText(link.toString())
-                      .then(() => setStatus('Invite link copied.'))
-                      .catch(() => setStatus(`Share this room code: ${room}`));
-                  }}
-                >
-                  Share invite link
-                </button>
-              )}
-            </header>
-
-            {room ? (
-              <>
-              <div className="board-tabs" role="tablist" aria-label="Doubt status">
-                <button
-                  className={view === 'open' ? 'tab active' : 'tab'}
-                  role="tab"
-                  aria-selected={view === 'open'}
-                  onClick={() => setView('open')}
-                >
-                  Open <span>{doubts.filter((message) => metaOf(message).status !== 'solved').length}</span>
-                </button>
-                <button
-                  className={view === 'solved' ? 'tab active' : 'tab'}
-                  role="tab"
-                  aria-selected={view === 'solved'}
-                  onClick={() => setView('solved')}
-                >
-                  Solved <span>{doubts.filter((message) => metaOf(message).status === 'solved').length}</span>
-                </button>
-              </div>
-
-              {view === 'solved' && (
-                <input
-                  className="answer-search"
-                  type="search"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search solved doubts and replies"
-                  aria-label="Search solved doubts and replies"
-                />
-              )}
-              {loadingMessages && <p className="state-message">Loading doubts…</p>}
-              {roomError && <p className="error-message" role="alert">{roomError}</p>}
-              {!loadingMessages && !roomError && visibleDoubts.length === 0 && (
-                <div className="empty-board">
-                  <h3>
-                    {normalizedSearch
-                      ? 'No matching solved answers'
-                      : view === 'open' ? 'No open doubts' : 'No solved doubts yet'}
-                  </h3>
-                  <p>
-                    {normalizedSearch
-                      ? 'Try another phrase or load more history.'
-                      : view === 'open' ? 'Post a question and start the conversation.' : 'Solved answers will be saved here.'}
-                  </p>
-                </div>
-              )}
-
-              <div className="doubt-list">
-              {visibleDoubts.map((doubt) => {
-                const solved = metaOf(doubt).status === 'solved';
+            <p className="login-footnote">No password needed for this demo.</p>
+          </section>
+          <button
+            className="login-theme"
+            onClick={() => {
+              const next = theme === 'light' ? 'dark' : 'light';
+              localStorage.setItem('doubtdesk.theme', next);
+              setTheme(next);
+            }}
+          >
+            {theme === 'light'
+              ? <><Moon size={15} strokeWidth={1.5} /> Dark mode</>
+              : <><Sun size={15} strokeWidth={1.5} /> Light mode</>}
+          </button>
+        </main>
+      ) : (
+        <div className="app-layout">
+          <aside className="desktop-sidebar">
+            <div className="brand-lockup">
+              <NotebookPen size={19} strokeWidth={1.5} />
+              <span>DoubtDesk</span>
+            </div>
+            <nav className="primary-nav" aria-label="Main navigation">
+              {PRIMARY_NAV.map((item) => {
+                const Icon = item.icon;
+                const active = page === item.key || (item.key === 'rooms' && page === 'room');
                 return (
-                  <article className="doubt-card" key={doubt.messageId}>
-                    <div className="doubt-meta">
-                      <span className={solved ? 'status-pill solved' : 'status-pill'}>{solved ? 'Solved' : 'Open'}</span>
-                      <span>{doubt.senderUserId === me ? 'You' : doubt.senderUserId}</span>
-                      <time dateTime={new Date(doubt.sentTime).toISOString()}>{formatTime(doubt.sentTime)}</time>
-                    </div>
-                    <p className="doubt-text">{textOf(doubt)}</p>
-                    <div className="reply-list">
-                    {repliesOf(doubt.messageId).map((reply) => {
-                      const isAI = metaOf(reply).author === 'ai';
-                      return (
-                        <article className={isAI ? 'reply-card ai-reply' : 'reply-card'} key={reply.messageId}>
-                          <div className="reply-meta">
-                            <strong>{isAI ? '🤖 DoubtDesk AI' : reply.senderUserId === me ? 'You' : reply.senderUserId}</strong>
-                            {isAI && <span className="ai-badge">AI first answer</span>}
-                            <time dateTime={new Date(reply.sentTime).toISOString()}>{formatTime(reply.sentTime)}</time>
-                          </div>
-                          <p>{textOf(reply)}</p>
-                        </article>
-                      );
-                    })}
-                    {repliesOf(doubt.messageId).length === 0 && (
-                      <p className="muted">No replies yet. Be the first to help.</p>
-                    )}
-                    </div>
-                    <div className="card-actions">
-                      <button onClick={() => setReplyTo(doubt.messageId)} disabled={sending}>Reply</button>
-                      {!solved && doubt.senderUserId === me && (
-                        <button
-                          onClick={() => void solve(doubt)}
-                          disabled={solvingMessage !== null}
-                        >
-                          {solvingMessage === doubt.messageId ? 'Saving…' : 'Mark solved'}
-                        </button>
-                      )}
-                    </div>
-                  </article>
+                  <button
+                    className={active ? 'nav-item active' : 'nav-item'}
+                    key={item.key}
+                    onClick={() => selectNavigation(item.key)}
+                    aria-current={active ? 'page' : undefined}
+                  >
+                    <Icon size={16} strokeWidth={1.5} />
+                    <span>{item.label}</span>
+                  </button>
                 );
               })}
-              <div ref={bottomRef} />
-              </div>
-              {hasMore && (
-                <button className="load-more" onClick={loadMore} disabled={loadingMore || loadingMessages}>
-                  {loadingMore ? 'Loading…' : 'Load older doubts'}
+            </nav>
+            <div className="sidebar-room-section">
+              <div className="sidebar-section-heading">
+                <span>YOUR ROOMS</span>
+                <button aria-label="Create or join a room" onClick={() => selectNavigation('rooms')}>
+                  <Plus size={15} strokeWidth={1.5} />
                 </button>
+              </div>
+              <div className="sidebar-room-list">
+                {rooms.map((entry) => {
+                  const count = (messagesByRoom[entry.id] ?? []).filter(
+                    (message) =>
+                      metaOf(message).kind === 'doubt' && metaOf(message).status !== 'solved',
+                  ).length;
+                  return (
+                    <button
+                      className={page === 'room' && entry.id === room ? 'sidebar-room active' : 'sidebar-room'}
+                      key={entry.id}
+                      onClick={() => openRoom(entry.id)}
+                    >
+                      <span className="room-marker" />
+                      <span className="sidebar-room-name">{entry.name}</span>
+                      {count > 0 && <span className="sidebar-room-count">{count}</span>}
+                    </button>
+                  );
+                })}
+                {rooms.length === 0 && <p className="sidebar-empty">No rooms yet.</p>}
+              </div>
+            </div>
+            <div className="sidebar-account">
+              <span className="account-mark">{displayName.slice(0, 1).toUpperCase() || 'S'}</span>
+              <span className="account-name">{displayName || 'Student'}</span>
+            </div>
+          </aside>
+
+          <div className="app-main">
+            <header className="topbar">
+              <div className="topbar-title">
+                <p className="section-kicker">{page === 'room' ? 'ROOM' : 'DOUBTDESK'}</p>
+                <h1>{currentTitle || 'Rooms'}</h1>
+              </div>
+              <div className="topbar-actions">
+                <button className="search-trigger" onClick={() => setSearchOpen(true)}>
+                  <Search size={16} strokeWidth={1.5} />
+                  <span>Search</span>
+                  <kbd>⌘K</kbd>
+                </button>
+                <button
+                  className="icon-action"
+                  aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+                  onClick={() => {
+                    const next = theme === 'light' ? 'dark' : 'light';
+                    localStorage.setItem('doubtdesk.theme', next);
+                    setTheme(next);
+                  }}
+                >
+                  {theme === 'light'
+                    ? <Moon size={16} strokeWidth={1.5} />
+                    : <Sun size={16} strokeWidth={1.5} />}
+                </button>
+              </div>
+            </header>
+
+            <main className="content-area">
+              {!apiReachable && (
+                <p className="api-banner" role="alert">
+                  <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
+                </p>
+              )}
+              {notice && <p className="notice" role="alert">{notice}</p>}
+              {aiStatus && <p className="ai-status" role="status">{aiStatus}</p>}
+
+              {page === 'dashboard' && (
+                <section className="reading-column">
+                  <p className="page-description">Recent activity from rooms you can access.</p>
+                  {Object.entries(historyErrors).map(([id, message]) => (
+                    <p className="error-message" role="alert" key={id}>
+                      {rooms.find((entry) => entry.id === id)?.name ?? id}: {message}
+                    </p>
+                  ))}
+                  <div className="metrics-row" aria-label="Room summary">
+                    <div className="metric">
+                      <span>ROOMS</span>
+                      <strong>{rooms.length}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>OPEN DOUBTS</span>
+                      <strong>{openDoubts.length}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>NEED A REPLY</span>
+                      <strong>{needsAnswer.length}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>SOLVED</span>
+                      <strong>{solvedDoubts.length}</strong>
+                    </div>
+                  </div>
+                  <div className="section-heading">
+                    <div>
+                      <p className="section-kicker">OPEN DOUBTS</p>
+                      <h2>Needs an answer</h2>
+                    </div>
+                    <span className="section-count">{needsAnswer.length}</span>
+                  </div>
+                  {loadingRooms.size > 0 && doubtEntries.length === 0 ? (
+                    <p className="state-message">Loading room history…</p>
+                  ) : needsAnswer.length > 0 ? (
+                    <div className="doubt-list">
+                      {needsAnswer.slice(0, 12).map((entry) => renderDoubt(entry, true))}
+                    </div>
+                  ) : renderEmpty(
+                    rooms.length ? 'No doubts need a reply.' : 'No rooms yet.',
+                    rooms.length
+                      ? 'New questions without a classmate reply will appear here.'
+                      : 'Create a subject room or join one with a room code.',
+                  )}
+                  {rooms.length > 0 && (
+                    <button className="inline-link" onClick={() => selectNavigation('rooms')}>
+                      View rooms <ChevronRight size={15} strokeWidth={1.5} />
+                    </button>
+                  )}
+                </section>
               )}
 
-              <div className="composer">
-                {replyTo && (
-                  <div className="replying-to">
-                    Replying to a doubt <button onClick={() => setReplyTo(null)}>Cancel</button>
+              {page === 'rooms' && (
+                <section className="wide-column">
+                  <p className="page-description">Create a subject room or join with a classmate’s room code.</p>
+                  <div className="rooms-layout">
+                    <div className="rooms-panel">
+                      <div className="section-heading">
+                        <div>
+                          <p className="section-kicker">SUBJECTS</p>
+                          <h2>Your rooms</h2>
+                        </div>
+                        <span className="section-count">{rooms.length}</span>
+                      </div>
+                      {rooms.length ? (
+                        <div className="room-directory">
+                          {rooms.map((entry) => {
+                            const messages = messagesByRoom[entry.id] ?? [];
+                            const openCount = messages.filter(
+                              (message) => metaOf(message).kind === 'doubt' && metaOf(message).status !== 'solved',
+                            ).length;
+                            const solvedCount = messages.filter(
+                              (message) => metaOf(message).kind === 'doubt' && metaOf(message).status === 'solved',
+                            ).length;
+                            return (
+                              <button className="room-directory-row" key={entry.id} onClick={() => openRoom(entry.id)}>
+                                <span className="room-directory-mark"><BookOpen size={17} strokeWidth={1.5} /></span>
+                                <span className="room-directory-main">
+                                  <strong>{entry.name}</strong>
+                                  <small>{entry.id}</small>
+                                </span>
+                                <span className="room-directory-counts">
+                                  <span>{openCount} open</span>
+                                  <span>{solvedCount} solved</span>
+                                </span>
+                                <ArrowUpRight size={15} strokeWidth={1.5} />
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : renderEmpty('No rooms yet.', 'Create a room for your course or enter a code from a classmate.')}
+                    </div>
+
+                    <div className="room-forms">
+                      <form
+                        className="form-panel"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void create();
+                        }}
+                      >
+                        <p className="section-kicker">NEW ROOM</p>
+                        <h2>Create a room</h2>
+                        <label htmlFor="room-name">Subject name</label>
+                        <input
+                          id="room-name"
+                          value={roomName}
+                          onChange={(event) => setRoomName(event.target.value)}
+                          placeholder="e.g. Physics 101"
+                          maxLength={64}
+                        />
+                        <label htmlFor="room-code">Room code</label>
+                        <input
+                          id="room-code"
+                          value={roomInput}
+                          onChange={(event) => setRoomInput(event.target.value)}
+                          placeholder="Letters and numbers"
+                          maxLength={64}
+                          required
+                        />
+                        <label htmlFor="room-invitees">Invitee IDs <span>(optional)</span></label>
+                        <input
+                          id="room-invitees"
+                          value={invitees}
+                          onChange={(event) => setInvitees(event.target.value)}
+                          placeholder="Separate IDs with commas"
+                        />
+                        <div className="preset-list" aria-label="Preset subjects">
+                          {PRESET_SUBJECTS.map((preset) => (
+                            <button
+                              className="preset-button"
+                              key={preset.name}
+                              type="button"
+                              onClick={() => {
+                                setRoomName(preset.name);
+                                setRoomInput(`${preset.code}${Date.now().toString(36).slice(-5)}`);
+                              }}
+                            >
+                              {preset.name}
+                            </button>
+                          ))}
+                        </div>
+                        <button className="primary-button" type="submit" disabled={roomWorking}>
+                          <Plus size={15} strokeWidth={1.5} />
+                          {roomWorking ? 'Creating…' : 'Create room'}
+                        </button>
+                      </form>
+
+                      <form
+                        className="form-panel"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void join();
+                        }}
+                      >
+                        <p className="section-kicker">JOIN ROOM</p>
+                        <h2>Enter a room code</h2>
+                        <label htmlFor="join-code">Room code or invite link</label>
+                        <input
+                          id="join-code"
+                          value={joinCode}
+                          onChange={(event) => setJoinCode(event.target.value)}
+                          placeholder="Paste a code or link"
+                          required
+                        />
+                        <button className="secondary-button" type="submit" disabled={roomWorking}>
+                          <DoorOpen size={15} strokeWidth={1.5} />
+                          {roomWorking ? 'Joining…' : 'Join room'}
+                        </button>
+                      </form>
+                    </div>
                   </div>
-                )}
-                <textarea
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      submit();
-                    }
-                  }}
-                  placeholder={replyTo ? 'Write a reply' : 'Post a new doubt'}
-                  maxLength={2000}
-                  rows={2}
-                />
-                <button onClick={submit} disabled={sending || !text.trim()}>
-                  {sending ? 'Sending…' : replyTo ? 'Send reply' : 'Post doubt'}
+                </section>
+              )}
+
+              {page === 'room' && (
+                <section className="reading-column room-page">
+                  {activeRoom ? (
+                    <>
+                      <div className="room-heading">
+                        <div>
+                          <p className="section-kicker">ROOM CODE · {activeRoom.id}</p>
+                          <h2>{activeRoom.name}</h2>
+                        </div>
+                        <button
+                          className="secondary-button compact"
+                          onClick={() => {
+                            const link = new URL(window.location.href);
+                            link.searchParams.set('room', room);
+                            void navigator.clipboard.writeText(link.toString())
+                              .then(() => setNotice('Invite link copied.'))
+                              .catch(() => setNotice(`Share this room code: ${room}`));
+                          }}
+                        >
+                          Share room
+                        </button>
+                      </div>
+                      {renderStatusTabs(activeEntries)}
+                      {historyErrors[room] && (
+                        <p className="error-message" role="alert">{historyErrors[room]}</p>
+                      )}
+                      {loadingRooms.has(room) && !messagesByRoom[room] ? (
+                        <p className="state-message">Loading room history…</p>
+                      ) : filteredRoomEntries.length ? (
+                        <div className="doubt-list">
+                          {filteredRoomEntries.map((entry) => renderDoubt(entry))}
+                        </div>
+                      ) : renderEmpty(
+                        view === 'solved' ? 'No solved doubts in this room yet.' : 'No open doubts in this room.',
+                        view === 'solved'
+                          ? 'Solve a doubt and it will show up here.'
+                          : 'Ask a doubt to start the discussion.',
+                      )}
+                      {hasOlder && (
+                        <button className="secondary-button load-more" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                          {loadingOlder ? 'Loading…' : 'Load older doubts'}
+                        </button>
+                      )}
+                      {view === 'open' && (
+                        <form
+                          className="composer"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void submit();
+                          }}
+                        >
+                          {replyTo && (
+                            <div className="replying-to">
+                              <span>Replying to a doubt</span>
+                              <button type="button" className="text-action" onClick={() => setReplyTo(null)}>Cancel</button>
+                            </div>
+                          )}
+                          <textarea
+                            value={text}
+                            onChange={(event) => setText(event.target.value)}
+                            placeholder={replyTo ? 'Write a reply' : 'Ask a doubt'}
+                            maxLength={2000}
+                            rows={3}
+                          />
+                          <div className="composer-footer">
+                            <span>{replyTo ? 'Replies stay with their doubt.' : 'Keep the question specific.'}</span>
+                            <button className="primary-button" type="submit" disabled={sending || !text.trim()}>
+                              {sending ? 'Sending…' : replyTo ? 'Send reply' : 'Ask a doubt'}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </>
+                  ) : renderEmpty('Choose a room.', 'Open a subject room from the navigation or join with a room code.')}
+                </section>
+              )}
+
+              {page === 'my-doubts' && (
+                <section className="reading-column">
+                  <p className="page-description">Doubts you started across your rooms.</p>
+                  {renderStatusTabs(myDoubts)}
+                  {filteredMyDoubts.length ? (
+                    <div className="doubt-list">{filteredMyDoubts.map((entry) => renderDoubt(entry, true))}</div>
+                  ) : renderEmpty(
+                    view === 'solved' ? 'No solved doubts from you yet.' : 'You have not asked a doubt yet.',
+                    view === 'solved' ? 'Solved doubts you started will appear here.' : 'Open a room and ask a course question.',
+                  )}
+                </section>
+              )}
+
+              {page === 'answer-bank' && (
+                <section className="reading-column">
+                  <p className="page-description">Solved questions and their replies from loaded room history.</p>
+                  <label className="search-field">
+                    <Search size={16} strokeWidth={1.5} />
+                    <input
+                      type="search"
+                      value={searchTerm}
+                      onChange={(event) => setSearchTerm(event.target.value)}
+                      placeholder="Search solved doubts and replies"
+                      aria-label="Search solved doubts and replies"
+                    />
+                  </label>
+                  {filteredAnswers.length ? (
+                    <div className="doubt-list">{filteredAnswers.map((entry) => renderDoubt(entry, true))}</div>
+                  ) : renderEmpty(
+                    normalizedSearch ? 'No matching solved answers.' : 'No solved doubts yet.',
+                    normalizedSearch
+                      ? 'Try another phrase or load more room history.'
+                      : 'Solve one and it will show up here.',
+                  )}
+                  {hasOlder && (
+                    <button className="secondary-button load-more" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                      {loadingOlder ? 'Loading…' : 'Load older room history'}
+                    </button>
+                  )}
+                </section>
+              )}
+            </main>
+          </div>
+
+          <nav className="mobile-nav" aria-label="Main navigation">
+            {PRIMARY_NAV.map((item) => {
+              const Icon = item.icon;
+              const active = page === item.key || (item.key === 'rooms' && page === 'room');
+              return (
+                <button
+                  className={active ? 'mobile-nav-item active' : 'mobile-nav-item'}
+                  key={item.key}
+                  onClick={() => selectNavigation(item.key)}
+                  aria-current={active ? 'page' : undefined}
+                >
+                  <Icon size={18} strokeWidth={1.5} />
+                  <span>{item.label}</span>
                 </button>
-              </div>
-              </>
-            ) : (
-              <div className="empty-room">
-                <h3>Make every doubt count.</h3>
-                <p>Create a subject room or join a classmate with a room code.</p>
-              </div>
-            )}
-          </main>
+              );
+            })}
+          </nav>
         </div>
-        )}
-      </div>
+      )}
+
+      {searchOpen && (
+        <div
+          className="search-scrim"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSearchOpen(false);
+          }}
+        >
+          <section className="search-dialog" role="dialog" aria-modal="true" aria-label="Search DoubtDesk">
+            <div className="search-dialog-input">
+              <Search size={18} strokeWidth={1.5} />
+              <input
+                ref={searchInputRef}
+                value={globalSearch}
+                onChange={(event) => setGlobalSearch(event.target.value)}
+                placeholder="Search doubts and replies"
+                aria-label="Search doubts and replies"
+              />
+              <button className="icon-action" aria-label="Close search" onClick={() => setSearchOpen(false)}>
+                <X size={16} strokeWidth={1.5} />
+              </button>
+            </div>
+            <div className="search-results">
+              {normalizedGlobalSearch ? globalResults.length ? globalResults.map((entry) => (
+                <button className="search-result" key={entry.doubt.messageId} onClick={() => openSearchResult(entry)}>
+                  <span className={metaOf(entry.doubt).status === 'solved' ? 'status-label is-solved' : 'status-label'}>
+                    {metaOf(entry.doubt).status === 'solved' ? 'SOLVED' : 'OPEN'}
+                  </span>
+                  <span className="search-result-copy">
+                    <strong>{textOf(entry.doubt)}</strong>
+                    <small>{entry.room.name} · {entry.replies.length} replies</small>
+                  </span>
+                  <ArrowUpRight size={15} strokeWidth={1.5} />
+                </button>
+              )) : <p className="search-hint">No matching loaded doubts or replies.</p>
+                : <p className="search-hint">Search the doubts and replies in your loaded room history.</p>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
+
+export default App;
