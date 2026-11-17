@@ -41,6 +41,7 @@ Requirements: Node.js 20+ and a Nexconn app in the Singapore data center.
    ```sh
    npm install
    npm run build
+   npm test
    ```
 
 4. Start the API and frontend together:
@@ -51,7 +52,7 @@ Requirements: Node.js 20+ and a Nexconn app in the Singapore data center.
 
 5. Open `http://127.0.0.1:5173`, sign in with a display name, create a subject room or join a room code, then post a doubt.
 
-Gemini defaults to `gemini-3.5-flash-lite`; set `GEMINI_MODEL` in `.env.server` to use another model. The backend retries transient 429/503 responses and timeouts with `gemini-3.6-flash`. Answers are limited to 110 words and include a reminder to confirm with a senior or teacher. AI failure never prevents the doubt from being posted.
+Gemini defaults to `gemini-3.5-flash-lite`; set `GEMINI_MODEL` in `.env.server` to use another model. The backend retries transient API errors, timeouts, and incomplete generations with `gemini-3.6-flash` under a 9-second total request budget. It returns only complete answers, limits them to 110 words, and adds a reminder to confirm with a senior or teacher. AI failure never prevents the doubt from being posted.
 
 ## Rooms and sharing
 

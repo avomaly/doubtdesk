@@ -83,6 +83,35 @@ function mergeMessages(...pages: RoomMessage[][]) {
   return [...messages.values()].sort((left, right) => left.sentTime - right.sentTime);
 }
 
+function subjectClass(name: string) {
+  const subject = name.toLowerCase();
+  if (subject.includes('physics')) return 'subject-physics';
+  if (subject.includes('chemistry')) return 'subject-chemistry';
+  if (subject.includes('calculus') || subject.includes('math')) return 'subject-math';
+  return 'subject-default';
+}
+
+function studyStreakDays(messages: RoomMessage[], userId: string) {
+  const activeDays = new Set(
+    messages
+      .filter((message) => message.senderUserId === userId)
+      .map((message) => {
+        const date = new Date(message.sentTime);
+        return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      }),
+  );
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  const keyOf = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  if (!activeDays.has(keyOf(cursor))) cursor.setDate(cursor.getDate() - 1);
+  let streak = 0;
+  while (activeDays.has(keyOf(cursor))) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
 function aiText(text: string) {
   return text
     .replace(/\s*\n*\(AI answer - confirm with your seniors or teacher\.\)$/i, '')
@@ -224,6 +253,10 @@ function App() {
   const solvedDoubts = doubtEntries.filter((entry) => metaOf(entry.doubt).status === 'solved');
   const needsAnswer = openDoubts.filter(
     (entry) => !entry.replies.some((reply) => metaOf(reply).author !== 'ai'),
+  );
+  const studyStreak = studyStreakDays(
+    roomEntries.flatMap((entry) => entry.messages),
+    me,
   );
   const filteredRoomEntries = activeEntries.filter(
     (entry) => (metaOf(entry.doubt).status === 'solved') === (view === 'solved'),
@@ -520,13 +553,13 @@ function App() {
             <NotebookPen size={19} strokeWidth={1.5} />
             <span>DoubtDesk</span>
           </div>
-          <section className="login-panel">
+          <section className="login-panel glass-strong">
             <p className="section-kicker">STUDY ROOMS</p>
             <h1>Sign in</h1>
             <p className="login-description">Use a display name your classmates recognize.</p>
-            {notice && <p className="notice" role="alert">{notice}</p>}
+            {notice && <p className="notice glass-strong" role="alert">{notice}</p>}
             {!apiReachable && (
-              <p className="api-banner" role="alert">
+              <p className="api-banner glass-strong" role="alert">
                 <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
               </p>
             )}
@@ -568,7 +601,7 @@ function App() {
         </main>
       ) : (
         <div className="app-layout">
-          <aside className="desktop-sidebar">
+          <aside className="desktop-sidebar glass">
             <div className="brand-lockup">
               <NotebookPen size={19} strokeWidth={1.5} />
               <span>DoubtDesk</span>
@@ -609,7 +642,7 @@ function App() {
                       key={entry.id}
                       onClick={() => openRoom(entry.id)}
                     >
-                      <span className="room-marker" />
+                      <span className={`room-marker ${subjectClass(entry.name)}`} />
                       <span className="sidebar-room-name">{entry.name}</span>
                       {count > 0 && <span className="sidebar-room-count">{count}</span>}
                     </button>
@@ -625,13 +658,18 @@ function App() {
           </aside>
 
           <div className="app-main">
-            <header className="topbar">
+            <header className="topbar glass">
               <div className="topbar-title">
                 <p className="section-kicker">{page === 'room' ? 'ROOM' : 'DOUBTDESK'}</p>
                 <h1>{currentTitle || 'Rooms'}</h1>
               </div>
               <div className="topbar-actions">
-                <button className="search-trigger" onClick={() => setSearchOpen(true)}>
+                <button
+                  className="search-trigger"
+                  aria-label="Search doubts and replies"
+                  aria-keyshortcuts="Meta+K Control+K"
+                  onClick={() => setSearchOpen(true)}
+                >
                   <Search size={16} strokeWidth={1.5} />
                   <span>Search</span>
                   <kbd>⌘K</kbd>
@@ -654,18 +692,27 @@ function App() {
 
             <main className="content-area">
               {!apiReachable && (
-                <p className="api-banner" role="alert">
+                <p className="api-banner glass-strong" role="alert">
                   <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
                 </p>
               )}
-              {notice && <p className="notice" role="alert">{notice}</p>}
+              {notice && <p className="notice glass-strong" role="alert">{notice}</p>}
               {aiStatus && <p className="ai-status" role="status">{aiStatus}</p>}
 
               {page === 'dashboard' && (
                 <section className="reading-column">
                   <p className="page-description">Recent activity from rooms you can access.</p>
+                  <div className="dashboard-greeting glass">
+                    <p className="section-kicker">YOUR STUDY DESK</p>
+                    <h2>Good to see you, {displayName || 'student'}.</h2>
+                    <p>
+                      {needsAnswer.length
+                        ? `${needsAnswer.length} ${needsAnswer.length === 1 ? 'doubt has' : 'doubts have'} no peer reply yet.`
+                        : 'No doubts are waiting for a peer reply.'}
+                    </p>
+                  </div>
                   {Object.entries(historyErrors).map(([id, message]) => (
-                    <p className="error-message" role="alert" key={id}>
+                    <p className="error-message glass-strong" role="alert" key={id}>
                       {rooms.find((entry) => entry.id === id)?.name ?? id}: {message}
                     </p>
                   ))}
@@ -686,6 +733,10 @@ function App() {
                       <span>SOLVED</span>
                       <strong>{solvedDoubts.length}</strong>
                     </div>
+                    <div className="metric streak-metric">
+                      <span>STUDY STREAK</span>
+                      <strong>{studyStreak} <small>{studyStreak === 1 ? 'day' : 'days'}</small></strong>
+                    </div>
                   </div>
                   <div className="section-heading">
                     <div>
@@ -697,7 +748,7 @@ function App() {
                   {loadingRooms.size > 0 && doubtEntries.length === 0 ? (
                     <p className="state-message">Loading room history…</p>
                   ) : needsAnswer.length > 0 ? (
-                    <div className="doubt-list">
+                    <div className="doubt-list glass-strong">
                       {needsAnswer.slice(0, 12).map((entry) => renderDoubt(entry, true))}
                     </div>
                   ) : renderEmpty(
@@ -718,7 +769,7 @@ function App() {
                 <section className="wide-column">
                   <p className="page-description">Create a subject room or join with a classmate’s room code.</p>
                   <div className="rooms-layout">
-                    <div className="rooms-panel">
+                    <div className="rooms-panel glass">
                       <div className="section-heading">
                         <div>
                           <p className="section-kicker">SUBJECTS</p>
@@ -727,7 +778,7 @@ function App() {
                         <span className="section-count">{rooms.length}</span>
                       </div>
                       {rooms.length ? (
-                        <div className="room-directory">
+                        <div className="room-directory glass-strong">
                           {rooms.map((entry) => {
                             const messages = messagesByRoom[entry.id] ?? [];
                             const openCount = messages.filter(
@@ -738,7 +789,9 @@ function App() {
                             ).length;
                             return (
                               <button className="room-directory-row" key={entry.id} onClick={() => openRoom(entry.id)}>
-                                <span className="room-directory-mark"><BookOpen size={17} strokeWidth={1.5} /></span>
+                                <span className={`room-directory-mark ${subjectClass(entry.name)}`}>
+                                  <BookOpen size={17} strokeWidth={1.5} />
+                                </span>
                                 <span className="room-directory-main">
                                   <strong>{entry.name}</strong>
                                   <small>{entry.id}</small>
@@ -757,7 +810,7 @@ function App() {
 
                     <div className="room-forms">
                       <form
-                        className="form-panel"
+                        className="form-panel glass"
                         onSubmit={(event) => {
                           event.preventDefault();
                           void create();
@@ -811,7 +864,7 @@ function App() {
                       </form>
 
                       <form
-                        className="form-panel"
+                        className="form-panel glass"
                         onSubmit={(event) => {
                           event.preventDefault();
                           void join();
@@ -861,12 +914,12 @@ function App() {
                       </div>
                       {renderStatusTabs(activeEntries)}
                       {historyErrors[room] && (
-                        <p className="error-message" role="alert">{historyErrors[room]}</p>
+                        <p className="error-message glass-strong" role="alert">{historyErrors[room]}</p>
                       )}
                       {loadingRooms.has(room) && !messagesByRoom[room] ? (
                         <p className="state-message">Loading room history…</p>
                       ) : filteredRoomEntries.length ? (
-                        <div className="doubt-list">
+                        <div className="doubt-list glass-strong">
                           {filteredRoomEntries.map((entry) => renderDoubt(entry))}
                         </div>
                       ) : renderEmpty(
@@ -882,7 +935,7 @@ function App() {
                       )}
                       {view === 'open' && (
                         <form
-                          className="composer"
+                          className="composer glass-strong"
                           onSubmit={(event) => {
                             event.preventDefault();
                             void submit();
@@ -919,7 +972,7 @@ function App() {
                   <p className="page-description">Doubts you started across your rooms.</p>
                   {renderStatusTabs(myDoubts)}
                   {filteredMyDoubts.length ? (
-                    <div className="doubt-list">{filteredMyDoubts.map((entry) => renderDoubt(entry, true))}</div>
+                    <div className="doubt-list glass-strong">{filteredMyDoubts.map((entry) => renderDoubt(entry, true))}</div>
                   ) : renderEmpty(
                     view === 'solved' ? 'No solved doubts from you yet.' : 'You have not asked a doubt yet.',
                     view === 'solved' ? 'Solved doubts you started will appear here.' : 'Open a room and ask a course question.',
@@ -941,7 +994,7 @@ function App() {
                     />
                   </label>
                   {filteredAnswers.length ? (
-                    <div className="doubt-list">{filteredAnswers.map((entry) => renderDoubt(entry, true))}</div>
+                    <div className="doubt-list glass-strong">{filteredAnswers.map((entry) => renderDoubt(entry, true))}</div>
                   ) : renderEmpty(
                     normalizedSearch ? 'No matching solved answers.' : 'No solved doubts yet.',
                     normalizedSearch
@@ -958,7 +1011,7 @@ function App() {
             </main>
           </div>
 
-          <nav className="mobile-nav" aria-label="Main navigation">
+          <nav className="mobile-nav glass" aria-label="Main navigation">
             {PRIMARY_NAV.map((item) => {
               const Icon = item.icon;
               const active = page === item.key || (item.key === 'rooms' && page === 'room');
@@ -986,7 +1039,7 @@ function App() {
             if (event.target === event.currentTarget) setSearchOpen(false);
           }}
         >
-          <section className="search-dialog" role="dialog" aria-modal="true" aria-label="Search DoubtDesk">
+          <section className="search-dialog glass-strong" role="dialog" aria-modal="true" aria-label="Search DoubtDesk">
             <div className="search-dialog-input">
               <Search size={18} strokeWidth={1.5} />
               <input
