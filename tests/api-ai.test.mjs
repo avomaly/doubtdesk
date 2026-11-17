@@ -3,18 +3,21 @@ import { Readable } from 'node:stream';
 import { test } from 'node:test';
 
 process.env.GEMINI_API_KEY = 'test-key';
-const { handleApiRequest } = await import('../lib/api-handler.mjs');
+process.env.NEXCONN_APP_SECRET = 'test-app-secret-1234567890';
+const { handleApiRequest, createAppSession } = await import('../lib/api-handler.mjs');
 
-function createRequest(question, ip) {
+const validSession = createAppSession('student12345');
+
+function createRequest(question, ip, authHeader = `Bearer ${validSession}`) {
   const req = Readable.from([JSON.stringify({ question })]);
   req.method = 'POST';
   req.url = '/api/ask';
-  req.headers = {};
+  req.headers = authHeader ? { authorization: authHeader } : {};
   req.socket = { remoteAddress: ip };
   return req;
 }
 
-async function ask(question, ip) {
+async function ask(question, ip, authHeader = `Bearer ${validSession}`) {
   const result = { status: 0, body: '' };
   const res = {
     writeHead(status) {
@@ -24,7 +27,7 @@ async function ask(question, ip) {
       result.body = body;
     },
   };
-  await handleApiRequest(createRequest(question, ip), res);
+  await handleApiRequest(createRequest(question, ip, authHeader), res);
   return { status: result.status, body: JSON.parse(result.body) };
 }
 
@@ -36,6 +39,18 @@ function geminiResponse(text, finishReason = 'STOP') {
     }],
   };
 }
+
+test('rejects unauthenticated requests to /api/ask with 401', async () => {
+  const { status, body } = await ask('What is gravity?', '127.0.0.1', '');
+  assert.equal(status, 401);
+  assert.match(body.error, /Sign in/i);
+});
+
+test('rejects forged or expired session tokens on /api/ask with 401', async () => {
+  const { status, body } = await ask('What is gravity?', '127.0.0.1', 'Bearer invalid.token.payload');
+  assert.equal(status, 401);
+  assert.match(body.error, /Sign in/i);
+});
 
 test('retries a truncated Gemini answer and returns only a complete answer', async () => {
   const originalFetch = globalThis.fetch;
@@ -142,6 +157,23 @@ test('keeps long answers within the word cap without cutting a sentence', async 
     assert.equal(status, 200);
     assert.ok(answer.split(/\s+/).length <= 110);
     assert.equal(answer, firstSentence);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('gracefully handles 429 quota exhaustion with student-friendly fallback', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 429,
+    json: async () => ({ error: { message: 'Resource has been exhausted (quota exceeded)', status: 'RESOURCE_EXHAUSTED' } }),
+  });
+
+  try {
+    const { status, body } = await ask('Explain wave-particle duality.', '127.0.0.99');
+    assert.equal(status, 200);
+    assert.match(body.answer, /temporarily at capacity.*senior/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

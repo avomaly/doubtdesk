@@ -6,18 +6,36 @@ import {
   DoorOpen,
   LayoutDashboard,
   Library,
+  LogOut,
   Moon,
   NotebookPen,
   Plus,
   Search,
   Sun,
+  WifiOff,
   X,
 } from 'lucide-react';
 import './App.css';
-import { connectUser, onActivity } from './nexconn';
 import {
-  checkAPI, loginUser, createRoom, joinRoom, fetchRoomMessages, postDoubt, postReply,
-  postAIReply, askAI, markSolved, textOf, metaOf,
+  connectUser,
+  disconnectUser,
+  onActivity,
+  onConnectionStateChange,
+  type ConnectionStatusType,
+} from './nexconn';
+import {
+  checkAPI,
+  loginUser,
+  createRoom,
+  joinRoom,
+  fetchRoomMessages,
+  postDoubt,
+  postReply,
+  postAIReply,
+  askAI,
+  markSolved,
+  textOf,
+  metaOf,
   type RoomMessage,
 } from './chat';
 
@@ -79,8 +97,15 @@ function formatTime(sentTime: number) {
 
 function mergeMessages(...pages: RoomMessage[][]) {
   const messages = new Map<string, RoomMessage>();
-  pages.flat().forEach((message) => messages.set(message.messageId, message));
-  return [...messages.values()].sort((left, right) => left.sentTime - right.sentTime);
+  pages.flat().forEach((message) => {
+    if (message?.messageId) {
+      messages.set(message.messageId, message);
+    }
+  });
+  return [...messages.values()].sort((left, right) => {
+    if (left.sentTime !== right.sentTime) return left.sentTime - right.sentTime;
+    return left.messageId.localeCompare(right.messageId);
+  });
 }
 
 function subjectClass(name: string) {
@@ -89,6 +114,21 @@ function subjectClass(name: string) {
   if (subject.includes('chemistry')) return 'subject-chemistry';
   if (subject.includes('calculus') || subject.includes('math')) return 'subject-math';
   return 'subject-default';
+}
+
+function userColor(id: string) {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash << 5) - hash + id.charCodeAt(i);
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 48%, 42%)`;
+}
+
+function userInitials(id: string) {
+  if (!id) return 'ST';
+  const clean = id.replace(/^student_?/, '');
+  return clean.slice(0, 2).toUpperCase() || 'ST';
 }
 
 function studyStreakDays(messages: RoomMessage[], userId: string) {
@@ -120,16 +160,21 @@ function aiText(text: string) {
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(
-    () => localStorage.getItem('doubtdesk.theme') === 'dark' ? 'dark' : 'light',
+    () => (localStorage.getItem('doubtdesk.theme') === 'dark' ? 'dark' : 'light'),
   );
   const [displayName, setDisplayName] = useState(
     () => sessionStorage.getItem('doubtdesk.name') ?? '',
   );
+  const [me, setMe] = useState(
+    () => sessionStorage.getItem('doubtdesk.userId') ?? '',
+  );
+  const [apiSession, setApiSession] = useState(
+    () => sessionStorage.getItem('doubtdesk.session') ?? '',
+  );
+  const [connectionState, setConnectionState] = useState<ConnectionStatusType>('disconnected');
   const [apiReachable, setApiReachable] = useState(true);
   const [authenticating, setAuthenticating] = useState(false);
   const [roomWorking, setRoomWorking] = useState(false);
-  const [me, setMe] = useState('');
-  const [apiSession, setApiSession] = useState('');
   const [notice, setNotice] = useState('');
   const [aiStatus, setAiStatus] = useState('');
   const [roomInput, setRoomInput] = useState('');
@@ -156,6 +201,20 @@ function App() {
   const [solvingMessage, setSolvingMessage] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  const signOut = useCallback(async () => {
+    sessionStorage.removeItem('doubtdesk.name');
+    sessionStorage.removeItem('doubtdesk.userId');
+    sessionStorage.removeItem('doubtdesk.token');
+    sessionStorage.removeItem('doubtdesk.session');
+    setMe('');
+    setApiSession('');
+    setDisplayName('');
+    setRoom('');
+    setPage('dashboard');
+    await disconnectUser();
+  }, []);
+
+  // Health check polling
   useEffect(() => {
     let active = true;
     const check = async () => {
@@ -163,13 +222,37 @@ function App() {
       if (active) setApiReachable(reachable);
     };
     void check();
-    const interval = window.setInterval(() => { void check(); }, 5000);
+    const interval = window.setInterval(() => {
+      void check();
+    }, 5000);
     return () => {
       active = false;
       window.clearInterval(interval);
     };
   }, []);
 
+  // Subscribe to real-time chat connection status
+  useEffect(() => {
+    return onConnectionStateChange((state) => {
+      setConnectionState(state);
+    });
+  }, []);
+
+  // Auto-reconnect active session on page reload
+  useEffect(() => {
+    const token = sessionStorage.getItem('doubtdesk.token');
+    const savedUserId = sessionStorage.getItem('doubtdesk.userId');
+    if (token && savedUserId) {
+      connectUser(token).catch((err) => {
+        console.warn('Auto-reconnect on reload failed:', err);
+        if (String(err).includes('expired') || String(err).includes('31020')) {
+          void signOut();
+        }
+      });
+    }
+  }, [signOut]);
+
+  // Shortcut ⌘K / Ctrl+K
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -195,6 +278,7 @@ function App() {
   }, []);
 
   const refreshRoom = useCallback(async (id: string) => {
+    if (!id) return;
     setLoadingRooms((current) => new Set(current).add(id));
     try {
       const latest = await fetchRoomMessages(id);
@@ -211,7 +295,7 @@ function App() {
     } catch (error) {
       setHistoryErrors((current) => ({
         ...current,
-        [id]: error instanceof Error ? error.message : 'Could not load this room history.',
+        [id]: error instanceof Error ? error.message : 'Could not load room history.',
       }));
     } finally {
       setLoadingRooms((current) => {
@@ -223,29 +307,75 @@ function App() {
   }, []);
 
   const refreshAllRooms = useCallback(async () => {
+    if (!rooms.length) return;
     await Promise.all(rooms.map((entry) => refreshRoom(entry.id)));
   }, [refreshRoom, rooms]);
 
   useEffect(() => {
     if (!me) return;
     void refreshAllRooms();
-    return onActivity(() => { void refreshAllRooms(); });
+    return onActivity(() => {
+      void refreshAllRooms();
+    });
   }, [me, refreshAllRooms]);
 
   const roomEntries = useMemo(
     () => rooms.map((entry) => ({ ...entry, messages: messagesByRoom[entry.id] ?? [] })),
     [messagesByRoom, rooms],
   );
-  const doubtEntries = useMemo<DoubtEntry[]>(() => roomEntries.flatMap((entry) => {
-    const doubts = entry.messages.filter((message) => metaOf(message).kind === 'doubt');
-    return doubts.map((doubt) => ({
-      doubt,
-      room: { id: entry.id, name: entry.name },
-      replies: entry.messages.filter(
-        (message) => metaOf(message).kind === 'reply' && metaOf(message).replyTo === doubt.messageId,
-      ),
-    }));
-  }).sort((left, right) => right.doubt.sentTime - left.doubt.sentTime), [roomEntries]);
+
+  const doubtEntries = useMemo<DoubtEntry[]>(() => {
+    return roomEntries
+      .flatMap((entry) => {
+        const doubts = entry.messages.filter((message) => metaOf(message).kind === 'doubt');
+        const doubtMap = new Map<string, RoomMessage>(doubts.map((d) => [d.messageId, d]));
+        const repliesByDoubt = new Map<string, RoomMessage[]>();
+        const orphanReplies: RoomMessage[] = [];
+
+        entry.messages.forEach((message) => {
+          const meta = metaOf(message);
+          if (meta.kind === 'reply' && meta.replyTo) {
+            if (doubtMap.has(meta.replyTo)) {
+              const list = repliesByDoubt.get(meta.replyTo) || [];
+              list.push(message);
+              repliesByDoubt.set(meta.replyTo, list);
+            } else {
+              orphanReplies.push(message);
+            }
+          }
+        });
+
+        const mappedDoubts: DoubtEntry[] = doubts.map((doubt) => ({
+          doubt,
+          room: { id: entry.id, name: entry.name },
+          replies: repliesByDoubt.get(doubt.messageId) || [],
+        }));
+
+        // Preserve orphan replies so peer messages are never silently lost
+        if (orphanReplies.length > 0) {
+          orphanReplies.forEach((reply) => {
+            const meta = metaOf(reply);
+            const placeholder: RoomMessage = {
+              messageId: meta.replyTo || reply.messageId,
+              sentTime: reply.sentTime - 1,
+              senderUserId: 'classmate',
+              content: { text: '(Thread question from history)' },
+              metadata: { kind: 'doubt', status: 'open' },
+              setMetadata: async () => ({ code: 0 }),
+            };
+            mappedDoubts.push({
+              doubt: placeholder,
+              room: { id: entry.id, name: entry.name },
+              replies: [reply],
+            });
+          });
+        }
+
+        return mappedDoubts;
+      })
+      .sort((left, right) => right.doubt.sentTime - left.doubt.sentTime);
+  }, [roomEntries]);
+
   const activeRoom = rooms.find((entry) => entry.id === room);
   const activeEntries = doubtEntries.filter((entry) => entry.room.id === room);
   const myDoubts = doubtEntries.filter((entry) => entry.doubt.senderUserId === me);
@@ -288,73 +418,80 @@ function App() {
     }
   }
 
-  const connect = () => run(async () => {
-    const name = displayName.trim();
-    if (!name) throw new Error('Enter a display name to continue.');
-    if (authenticating) return;
-    setAuthenticating(true);
-    try {
-      const { userId, accessToken, sessionToken } = await loginUser(name);
-      const id = await connectUser(accessToken);
-      if (id !== userId) throw new Error('Could not confirm your Nexconn account. Sign in again.');
-      sessionStorage.setItem('doubtdesk.name', name);
-      setApiSession(sessionToken);
-      setMe(id);
-      const sharedCode = roomCodeFrom(joinCode);
-      if (sharedCode) {
-        await joinRoom(sharedCode);
-        rememberRoom({ id: sharedCode, name: sharedCode });
-        setRoom(sharedCode);
-        setPage('room');
+  const connect = () =>
+    run(async () => {
+      const name = displayName.trim();
+      if (!name) throw new Error('Enter a display name to continue.');
+      if (authenticating) return;
+      setAuthenticating(true);
+      try {
+        const { userId, accessToken, sessionToken } = await loginUser(name);
+        const id = await connectUser(accessToken);
+        if (id !== userId) throw new Error('Could not confirm your Nexconn account. Sign in again.');
+        sessionStorage.setItem('doubtdesk.name', name);
+        sessionStorage.setItem('doubtdesk.userId', id);
+        sessionStorage.setItem('doubtdesk.token', accessToken);
+        sessionStorage.setItem('doubtdesk.session', sessionToken);
+        setApiSession(sessionToken);
+        setMe(id);
+        const sharedCode = roomCodeFrom(joinCode);
+        if (sharedCode) {
+          await joinRoom(sharedCode);
+          rememberRoom({ id: sharedCode, name: sharedCode });
+          setRoom(sharedCode);
+          setPage('room');
+        }
+      } finally {
+        setAuthenticating(false);
       }
-    } finally {
-      setAuthenticating(false);
-    }
-  });
+    });
 
-  const create = () => run(async () => {
-    const id = roomInput.trim();
-    const label = roomName.trim() || id;
-    const list = invitees.split(',').map((item) => item.trim()).filter(Boolean);
-    if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
-      throw new Error('Use a room code with 1–64 letters or numbers.');
-    }
-    setRoomWorking(true);
-    try {
-      await createRoom(id, label, list, apiSession);
-      rememberRoom({ id, name: label });
-      setRoom(id);
-      setPage('room');
-      setView('open');
-    } finally {
-      setRoomWorking(false);
-    }
-  });
+  const create = () =>
+    run(async () => {
+      const id = roomInput.trim();
+      const label = roomName.trim() || id;
+      const list = invitees.split(',').map((item) => item.trim()).filter(Boolean);
+      if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
+        throw new Error('Use a room code with 1–64 letters or numbers.');
+      }
+      setRoomWorking(true);
+      try {
+        await createRoom(id, label, list, apiSession);
+        await joinRoom(id);
+        rememberRoom({ id, name: label });
+        setRoom(id);
+        setPage('room');
+        setView('open');
+      } finally {
+        setRoomWorking(false);
+      }
+    });
 
-  const join = () => run(async () => {
-    const id = roomCodeFrom(joinCode);
-    if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
-      throw new Error('Enter a room code with 1–64 letters or numbers.');
-    }
-    setRoomWorking(true);
-    try {
-      await joinRoom(id);
-      const existing = rooms.find((entry) => entry.id === id);
-      rememberRoom(existing ?? { id, name: id });
-      setRoom(id);
-      setPage('room');
-      setView('open');
-    } finally {
-      setRoomWorking(false);
-    }
-  });
+  const join = () =>
+    run(async () => {
+      const id = roomCodeFrom(joinCode);
+      if (!/^[A-Za-z0-9]{1,64}$/.test(id)) {
+        throw new Error('Enter a room code with 1–64 letters or numbers.');
+      }
+      setRoomWorking(true);
+      try {
+        await joinRoom(id);
+        const existing = rooms.find((entry) => entry.id === id);
+        rememberRoom(existing ?? { id, name: id });
+        setRoom(id);
+        setPage('room');
+        setView('open');
+      } finally {
+        setRoomWorking(false);
+      }
+    });
 
-  async function askBot(doubtId: string, question: string) {
-    setAiStatus('AI is drafting a first answer.');
+  async function askBot(targetRoom: string, doubtId: string, question: string) {
+    setAiStatus('AI is drafting a first answer...');
     try {
-      const answer = await askAI(question);
-      await postAIReply(room, doubtId, answer);
-      await refreshRoom(room);
+      const answer = await askAI(question, apiSession);
+      await postAIReply(targetRoom, doubtId, answer);
+      await refreshRoom(targetRoom);
       setAiStatus('');
     } catch (error) {
       console.error('AI answer failed:', error);
@@ -376,50 +513,55 @@ function App() {
           await refreshRoom(room);
           return;
         }
-        const doubt = await postDoubt(room, question);
+        const currentRoom = room;
+        const doubt = await postDoubt(currentRoom, question);
         setText('');
-        await refreshRoom(room);
-        void askBot(doubt.messageId, question);
+        await refreshRoom(currentRoom);
+        void askBot(currentRoom, doubt.messageId, question);
       } finally {
         setSending(false);
       }
     });
   };
 
-  const solve = (message: RoomMessage) => {
+  const solve = (targetRoomId: string, message: RoomMessage) => {
     if (solvingMessage) return;
     return run(async () => {
       setSolvingMessage(message.messageId);
       try {
         await markSolved(message);
-        await refreshRoom(room);
+        await refreshRoom(targetRoomId);
       } finally {
         setSolvingMessage(null);
       }
     });
   };
 
-  const loadOlder = () => run(async () => {
-    const targets = page === 'room' && room
-      ? [room]
-      : rooms.filter((entry) => hasMoreByRoom[entry.id]).map((entry) => entry.id);
-    if (!targets.length || loadingOlder) return;
-    setLoadingOlder(true);
-    try {
-      await Promise.all(targets.map(async (id) => {
-        const current = messagesByRoom[id] ?? [];
-        if (!current.length) return;
-        const older = await fetchRoomMessages(id, current[0].sentTime - 1);
-        setMessagesByRoom((cached) => ({
-          ...cached,
-          [id]: mergeMessages(older, cached[id] ?? []),
-        }));
-        setHasMoreByRoom((cached) => ({ ...cached, [id]: older.length >= 50 }));
-      }));
-    } finally {
-      setLoadingOlder(false);
-    }
-  });
+  const loadOlder = () =>
+    run(async () => {
+      const targets =
+        page === 'room' && room
+          ? [room]
+          : rooms.filter((entry) => hasMoreByRoom[entry.id]).map((entry) => entry.id);
+      if (!targets.length || loadingOlder) return;
+      setLoadingOlder(true);
+      try {
+        await Promise.all(
+          targets.map(async (id) => {
+            const current = messagesByRoom[id] ?? [];
+            if (!current.length) return;
+            const older = await fetchRoomMessages(id, current[0].sentTime - 1);
+            setMessagesByRoom((cached) => ({
+              ...cached,
+              [id]: mergeMessages(older, cached[id] ?? []),
+            }));
+            setHasMoreByRoom((cached) => ({ ...cached, [id]: older.length >= 50 }));
+          }),
+        );
+      } finally {
+        setLoadingOlder(false);
+      }
+    });
 
   function openRoom(id: string) {
     setRoom(id);
@@ -440,16 +582,20 @@ function App() {
     setSearchOpen(false);
   }
 
-  const currentTitle = page === 'room'
-    ? activeRoom?.name ?? room
-    : PRIMARY_NAV.find((item) => item.key === page)?.label ?? 'Dashboard';
-  const hasOlder = page === 'room'
-    ? Boolean(hasMoreByRoom[room])
-    : rooms.some((entry) => hasMoreByRoom[entry.id]);
+  const currentTitle =
+    page === 'room'
+      ? activeRoom?.name ?? room
+      : PRIMARY_NAV.find((item) => item.key === page)?.label ?? 'Dashboard';
+  const hasOlder =
+    page === 'room'
+      ? Boolean(hasMoreByRoom[room])
+      : rooms.some((entry) => hasMoreByRoom[entry.id]);
 
   function renderDoubt(entry: DoubtEntry, showRoom = false) {
     const metadata = metaOf(entry.doubt);
     const solved = metadata.status === 'solved';
+    const isMyDoubt = entry.doubt.senderUserId === me;
+
     return (
       <article className="doubt-entry" key={entry.doubt.messageId}>
         <div className="doubt-meta">
@@ -457,7 +603,13 @@ function App() {
             <span className={solved ? 'status-label is-solved' : 'status-label'}>
               {solved ? 'SOLVED' : 'OPEN'}
             </span>
-            <span>{entry.doubt.senderUserId === me ? 'You' : entry.doubt.senderUserId}</span>
+            <div
+              className="avatar-chip"
+              style={{ backgroundColor: userColor(entry.doubt.senderUserId) }}
+            >
+              {userInitials(entry.doubt.senderUserId)}
+            </div>
+            <span>{isMyDoubt ? 'You' : `Peer ${entry.doubt.senderUserId.slice(-4)}`}</span>
           </div>
           <time dateTime={new Date(entry.doubt.sentTime).toISOString()}>
             {formatTime(entry.doubt.sentTime)}
@@ -466,19 +618,34 @@ function App() {
         <h3 className="doubt-title">{textOf(entry.doubt)}</h3>
         {showRoom && (
           <button className="room-context" onClick={() => openRoom(entry.room.id)}>
-            {entry.room.name}<ArrowUpRight size={13} strokeWidth={1.5} />
+            {entry.room.name}
+            <ArrowUpRight size={13} strokeWidth={1.5} />
           </button>
         )}
         {entry.replies.length > 0 ? (
           <div className="reply-list">
             {entry.replies.map((reply) => {
               const isAI = metaOf(reply).author === 'ai';
+              const isMe = reply.senderUserId === me;
               return (
-                <article className={isAI ? 'reply-entry ai-reply' : 'reply-entry'} key={reply.messageId}>
+                <article
+                  className={isAI ? 'reply-entry ai-reply' : 'reply-entry'}
+                  key={reply.messageId}
+                >
                   <div className="reply-meta">
-                    <strong>
-                      {isAI ? 'DoubtDesk AI' : reply.senderUserId === me ? 'You' : reply.senderUserId}
-                    </strong>
+                    <div className="reply-author-lockup">
+                      <div
+                        className={isAI ? 'avatar-chip ai-chip' : 'avatar-chip'}
+                        style={
+                          isAI ? undefined : { backgroundColor: userColor(reply.senderUserId) }
+                        }
+                      >
+                        {isAI ? 'AI' : userInitials(reply.senderUserId)}
+                      </div>
+                      <strong>
+                        {isAI ? 'DoubtDesk AI' : isMe ? 'You' : `Peer ${reply.senderUserId.slice(-4)}`}
+                      </strong>
+                    </div>
                     {isAI && <span className="ai-badge">AI DRAFT</span>}
                     <time dateTime={new Date(reply.sentTime).toISOString()}>
                       {formatTime(reply.sentTime)}
@@ -494,13 +661,20 @@ function App() {
           <p className="no-replies">No replies yet.</p>
         )}
         <div className="doubt-actions">
-          <button className="text-action" onClick={() => setReplyTo(entry.doubt.messageId)} disabled={sending}>
+          <button
+            className="text-action"
+            onClick={() => {
+              if (page !== 'room') openRoom(entry.room.id);
+              setReplyTo(entry.doubt.messageId);
+            }}
+            disabled={sending}
+          >
             Reply
           </button>
-          {!solved && entry.doubt.senderUserId === me && (
+          {!solved && isMyDoubt && (
             <button
               className="text-action"
-              onClick={() => void solve(entry.doubt)}
+              onClick={() => void solve(entry.room.id, entry.doubt)}
               disabled={solvingMessage !== null}
             >
               {solvingMessage === entry.doubt.messageId ? 'Saving…' : 'Mark solved'}
@@ -557,7 +731,11 @@ function App() {
             <p className="section-kicker">STUDY ROOMS</p>
             <h1>Sign in</h1>
             <p className="login-description">Use a display name your classmates recognize.</p>
-            {notice && <p className="notice glass-strong" role="alert">{notice}</p>}
+            {notice && (
+              <p className="notice glass-strong" role="alert">
+                {notice}
+              </p>
+            )}
             {!apiReachable && (
               <p className="api-banner glass-strong" role="alert">
                 <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
@@ -594,9 +772,15 @@ function App() {
               setTheme(next);
             }}
           >
-            {theme === 'light'
-              ? <><Moon size={15} strokeWidth={1.5} /> Dark mode</>
-              : <><Sun size={15} strokeWidth={1.5} /> Light mode</>}
+            {theme === 'light' ? (
+              <>
+                <Moon size={15} strokeWidth={1.5} /> Dark mode
+              </>
+            ) : (
+              <>
+                <Sun size={15} strokeWidth={1.5} /> Light mode
+              </>
+            )}
           </button>
         </main>
       ) : (
@@ -626,7 +810,10 @@ function App() {
             <div className="sidebar-room-section">
               <div className="sidebar-section-heading">
                 <span>YOUR ROOMS</span>
-                <button aria-label="Create or join a room" onClick={() => selectNavigation('rooms')}>
+                <button
+                  aria-label="Create or join a room"
+                  onClick={() => selectNavigation('rooms')}
+                >
                   <Plus size={15} strokeWidth={1.5} />
                 </button>
               </div>
@@ -638,7 +825,11 @@ function App() {
                   ).length;
                   return (
                     <button
-                      className={page === 'room' && entry.id === room ? 'sidebar-room active' : 'sidebar-room'}
+                      className={
+                        page === 'room' && entry.id === room
+                          ? 'sidebar-room active'
+                          : 'sidebar-room'
+                      }
                       key={entry.id}
                       onClick={() => openRoom(entry.id)}
                     >
@@ -654,6 +845,14 @@ function App() {
             <div className="sidebar-account">
               <span className="account-mark">{displayName.slice(0, 1).toUpperCase() || 'S'}</span>
               <span className="account-name">{displayName || 'Student'}</span>
+              <button
+                className="signout-button"
+                title="Sign out"
+                onClick={() => void signOut()}
+                aria-label="Sign out"
+              >
+                <LogOut size={15} strokeWidth={1.5} />
+              </button>
             </div>
           </aside>
 
@@ -683,9 +882,11 @@ function App() {
                     setTheme(next);
                   }}
                 >
-                  {theme === 'light'
-                    ? <Moon size={16} strokeWidth={1.5} />
-                    : <Sun size={16} strokeWidth={1.5} />}
+                  {theme === 'light' ? (
+                    <Moon size={16} strokeWidth={1.5} />
+                  ) : (
+                    <Sun size={16} strokeWidth={1.5} />
+                  )}
                 </button>
               </div>
             </header>
@@ -696,8 +897,28 @@ function App() {
                   <strong>API server unreachable.</strong> Start the app with <code>npm run dev:all</code>, then try again.
                 </p>
               )}
-              {notice && <p className="notice glass-strong" role="alert">{notice}</p>}
-              {aiStatus && <p className="ai-status" role="status">{aiStatus}</p>}
+              {connectionState !== 'connected' && (
+                <div className="connection-banner glass-strong" role="status">
+                  <WifiOff size={14} strokeWidth={1.5} />
+                  <span>
+                    {connectionState === 'connecting'
+                      ? 'Connecting to chat…'
+                      : connectionState === 'reconnecting'
+                        ? 'Chat connection paused. Automatically reconnecting…'
+                        : 'Disconnected from chat.'}
+                  </span>
+                </div>
+              )}
+              {notice && (
+                <p className="notice glass-strong" role="alert">
+                  {notice}
+                </p>
+              )}
+              {aiStatus && (
+                <p className="ai-status" role="status">
+                  {aiStatus}
+                </p>
+              )}
 
               {page === 'dashboard' && (
                 <section className="reading-column">
@@ -735,7 +956,9 @@ function App() {
                     </div>
                     <div className="metric streak-metric">
                       <span>STUDY STREAK</span>
-                      <strong>{studyStreak} <small>{studyStreak === 1 ? 'day' : 'days'}</small></strong>
+                      <strong>
+                        {studyStreak} <small>{studyStreak === 1 ? 'day' : 'days'}</small>
+                      </strong>
                     </div>
                   </div>
                   <div className="section-heading">
@@ -751,11 +974,13 @@ function App() {
                     <div className="doubt-list glass-strong">
                       {needsAnswer.slice(0, 12).map((entry) => renderDoubt(entry, true))}
                     </div>
-                  ) : renderEmpty(
-                    rooms.length ? 'No doubts need a reply.' : 'No rooms yet.',
-                    rooms.length
-                      ? 'New questions without a classmate reply will appear here.'
-                      : 'Create a subject room or join one with a room code.',
+                  ) : (
+                    renderEmpty(
+                      rooms.length ? 'No doubts need a reply.' : 'No rooms yet.',
+                      rooms.length
+                        ? 'New questions without a classmate reply will appear here.'
+                        : 'Create a subject room or join one with a room code.',
+                    )
                   )}
                   {rooms.length > 0 && (
                     <button className="inline-link" onClick={() => selectNavigation('rooms')}>
@@ -767,7 +992,9 @@ function App() {
 
               {page === 'rooms' && (
                 <section className="wide-column">
-                  <p className="page-description">Create a subject room or join with a classmate’s room code.</p>
+                  <p className="page-description">
+                    Create a subject room or join with a classmate’s room code.
+                  </p>
                   <div className="rooms-layout">
                     <div className="rooms-panel glass">
                       <div className="section-heading">
@@ -782,13 +1009,21 @@ function App() {
                           {rooms.map((entry) => {
                             const messages = messagesByRoom[entry.id] ?? [];
                             const openCount = messages.filter(
-                              (message) => metaOf(message).kind === 'doubt' && metaOf(message).status !== 'solved',
+                              (message) =>
+                                metaOf(message).kind === 'doubt' &&
+                                metaOf(message).status !== 'solved',
                             ).length;
                             const solvedCount = messages.filter(
-                              (message) => metaOf(message).kind === 'doubt' && metaOf(message).status === 'solved',
+                              (message) =>
+                                metaOf(message).kind === 'doubt' &&
+                                metaOf(message).status === 'solved',
                             ).length;
                             return (
-                              <button className="room-directory-row" key={entry.id} onClick={() => openRoom(entry.id)}>
+                              <button
+                                className="room-directory-row"
+                                key={entry.id}
+                                onClick={() => openRoom(entry.id)}
+                              >
                                 <span className={`room-directory-mark ${subjectClass(entry.name)}`}>
                                   <BookOpen size={17} strokeWidth={1.5} />
                                 </span>
@@ -805,7 +1040,12 @@ function App() {
                             );
                           })}
                         </div>
-                      ) : renderEmpty('No rooms yet.', 'Create a room for your course or enter a code from a classmate.')}
+                      ) : (
+                        renderEmpty(
+                          'No rooms yet.',
+                          'Create a room for your course or enter a code from a classmate.',
+                        )
+                      )}
                     </div>
 
                     <div className="room-forms">
@@ -835,7 +1075,9 @@ function App() {
                           maxLength={64}
                           required
                         />
-                        <label htmlFor="room-invitees">Invitee IDs <span>(optional)</span></label>
+                        <label htmlFor="room-invitees">
+                          Invitee IDs <span>(optional)</span>
+                        </label>
                         <input
                           id="room-invitees"
                           value={invitees}
@@ -904,7 +1146,8 @@ function App() {
                           onClick={() => {
                             const link = new URL(window.location.href);
                             link.searchParams.set('room', room);
-                            void navigator.clipboard.writeText(link.toString())
+                            void navigator.clipboard
+                              .writeText(link.toString())
                               .then(() => setNotice('Invite link copied.'))
                               .catch(() => setNotice(`Share this room code: ${room}`));
                           }}
@@ -914,7 +1157,9 @@ function App() {
                       </div>
                       {renderStatusTabs(activeEntries)}
                       {historyErrors[room] && (
-                        <p className="error-message glass-strong" role="alert">{historyErrors[room]}</p>
+                        <p className="error-message glass-strong" role="alert">
+                          {historyErrors[room]}
+                        </p>
                       )}
                       {loadingRooms.has(room) && !messagesByRoom[room] ? (
                         <p className="state-message">Loading room history…</p>
@@ -922,14 +1167,22 @@ function App() {
                         <div className="doubt-list glass-strong">
                           {filteredRoomEntries.map((entry) => renderDoubt(entry))}
                         </div>
-                      ) : renderEmpty(
-                        view === 'solved' ? 'No solved doubts in this room yet.' : 'No open doubts in this room.',
-                        view === 'solved'
-                          ? 'Solve a doubt and it will show up here.'
-                          : 'Ask a doubt to start the discussion.',
+                      ) : (
+                        renderEmpty(
+                          view === 'solved'
+                            ? 'No solved doubts in this room yet.'
+                            : 'No open doubts in this room.',
+                          view === 'solved'
+                            ? 'Solve a doubt and it will show up here.'
+                            : 'Ask a doubt to start the discussion.',
+                        )
                       )}
                       {hasOlder && (
-                        <button className="secondary-button load-more" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                        <button
+                          className="secondary-button load-more"
+                          onClick={() => void loadOlder()}
+                          disabled={loadingOlder}
+                        >
                           {loadingOlder ? 'Loading…' : 'Load older doubts'}
                         </button>
                       )}
@@ -944,7 +1197,13 @@ function App() {
                           {replyTo && (
                             <div className="replying-to">
                               <span>Replying to a doubt</span>
-                              <button type="button" className="text-action" onClick={() => setReplyTo(null)}>Cancel</button>
+                              <button
+                                type="button"
+                                className="text-action"
+                                onClick={() => setReplyTo(null)}
+                              >
+                                Cancel
+                              </button>
                             </div>
                           )}
                           <textarea
@@ -955,15 +1214,34 @@ function App() {
                             rows={3}
                           />
                           <div className="composer-footer">
-                            <span>{replyTo ? 'Replies stay with their doubt.' : 'Keep the question specific.'}</span>
-                            <button className="primary-button" type="submit" disabled={sending || !text.trim()}>
-                              {sending ? 'Sending…' : replyTo ? 'Send reply' : 'Ask a doubt'}
+                            <span>
+                              {replyTo
+                                ? 'Replies stay with their doubt.'
+                                : 'Keep the question specific.'}
+                            </span>
+                            <button
+                              className="primary-button"
+                              type="submit"
+                              disabled={sending || !text.trim() || connectionState !== 'connected'}
+                            >
+                              {sending
+                                ? 'Sending…'
+                                : connectionState !== 'connected'
+                                  ? 'Connecting…'
+                                  : replyTo
+                                    ? 'Send reply'
+                                    : 'Ask a doubt'}
                             </button>
                           </div>
                         </form>
                       )}
                     </>
-                  ) : renderEmpty('Choose a room.', 'Open a subject room from the navigation or join with a room code.')}
+                  ) : (
+                    renderEmpty(
+                      'Choose a room.',
+                      'Open a subject room from the navigation or join with a room code.',
+                    )
+                  )}
                 </section>
               )}
 
@@ -972,17 +1250,27 @@ function App() {
                   <p className="page-description">Doubts you started across your rooms.</p>
                   {renderStatusTabs(myDoubts)}
                   {filteredMyDoubts.length ? (
-                    <div className="doubt-list glass-strong">{filteredMyDoubts.map((entry) => renderDoubt(entry, true))}</div>
-                  ) : renderEmpty(
-                    view === 'solved' ? 'No solved doubts from you yet.' : 'You have not asked a doubt yet.',
-                    view === 'solved' ? 'Solved doubts you started will appear here.' : 'Open a room and ask a course question.',
+                    <div className="doubt-list glass-strong">
+                      {filteredMyDoubts.map((entry) => renderDoubt(entry, true))}
+                    </div>
+                  ) : (
+                    renderEmpty(
+                      view === 'solved'
+                        ? 'No solved doubts from you yet.'
+                        : 'You have not asked a doubt yet.',
+                      view === 'solved'
+                        ? 'Solved doubts you started will appear here.'
+                        : 'Open a room and ask a course question.',
+                    )
                   )}
                 </section>
               )}
 
               {page === 'answer-bank' && (
                 <section className="reading-column">
-                  <p className="page-description">Solved questions and their replies from loaded room history.</p>
+                  <p className="page-description">
+                    Solved questions and their replies from loaded room history.
+                  </p>
                   <label className="search-field">
                     <Search size={16} strokeWidth={1.5} />
                     <input
@@ -994,15 +1282,23 @@ function App() {
                     />
                   </label>
                   {filteredAnswers.length ? (
-                    <div className="doubt-list glass-strong">{filteredAnswers.map((entry) => renderDoubt(entry, true))}</div>
-                  ) : renderEmpty(
-                    normalizedSearch ? 'No matching solved answers.' : 'No solved doubts yet.',
-                    normalizedSearch
-                      ? 'Try another phrase or load more room history.'
-                      : 'Solve one and it will show up here.',
+                    <div className="doubt-list glass-strong">
+                      {filteredAnswers.map((entry) => renderDoubt(entry, true))}
+                    </div>
+                  ) : (
+                    renderEmpty(
+                      normalizedSearch ? 'No matching solved answers.' : 'No solved doubts yet.',
+                      normalizedSearch
+                        ? 'Try another phrase or load more room history.'
+                        : 'Solve one and it will show up here.',
+                    )
                   )}
                   {hasOlder && (
-                    <button className="secondary-button load-more" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                    <button
+                      className="secondary-button load-more"
+                      onClick={() => void loadOlder()}
+                      disabled={loadingOlder}
+                    >
                       {loadingOlder ? 'Loading…' : 'Load older room history'}
                     </button>
                   )}
@@ -1039,7 +1335,12 @@ function App() {
             if (event.target === event.currentTarget) setSearchOpen(false);
           }}
         >
-          <section className="search-dialog glass-strong" role="dialog" aria-modal="true" aria-label="Search DoubtDesk">
+          <section
+            className="search-dialog glass-strong"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Search DoubtDesk"
+          >
             <div className="search-dialog-input">
               <Search size={18} strokeWidth={1.5} />
               <input
@@ -1049,24 +1350,47 @@ function App() {
                 placeholder="Search doubts and replies"
                 aria-label="Search doubts and replies"
               />
-              <button className="icon-action" aria-label="Close search" onClick={() => setSearchOpen(false)}>
+              <button
+                className="icon-action"
+                aria-label="Close search"
+                onClick={() => setSearchOpen(false)}
+              >
                 <X size={16} strokeWidth={1.5} />
               </button>
             </div>
             <div className="search-results">
-              {normalizedGlobalSearch ? globalResults.length ? globalResults.map((entry) => (
-                <button className="search-result" key={entry.doubt.messageId} onClick={() => openSearchResult(entry)}>
-                  <span className={metaOf(entry.doubt).status === 'solved' ? 'status-label is-solved' : 'status-label'}>
-                    {metaOf(entry.doubt).status === 'solved' ? 'SOLVED' : 'OPEN'}
-                  </span>
-                  <span className="search-result-copy">
-                    <strong>{textOf(entry.doubt)}</strong>
-                    <small>{entry.room.name} · {entry.replies.length} replies</small>
-                  </span>
-                  <ArrowUpRight size={15} strokeWidth={1.5} />
-                </button>
-              )) : <p className="search-hint">No matching loaded doubts or replies.</p>
-                : <p className="search-hint">Search the doubts and replies in your loaded room history.</p>}
+              {normalizedGlobalSearch ? (
+                globalResults.length ? (
+                  globalResults.map((entry) => (
+                    <button
+                      className="search-result"
+                      key={entry.doubt.messageId}
+                      onClick={() => openSearchResult(entry)}
+                    >
+                      <span
+                        className={
+                          metaOf(entry.doubt).status === 'solved'
+                            ? 'status-label is-solved'
+                            : 'status-label'
+                        }
+                      >
+                        {metaOf(entry.doubt).status === 'solved' ? 'SOLVED' : 'OPEN'}
+                      </span>
+                      <span className="search-result-copy">
+                        <strong>{textOf(entry.doubt)}</strong>
+                        <small>
+                          {entry.room.name} · {entry.replies.length} replies
+                        </small>
+                      </span>
+                      <ArrowUpRight size={15} strokeWidth={1.5} />
+                    </button>
+                  ))
+                ) : (
+                  <p className="search-hint">No matching loaded doubts or replies.</p>
+                )
+              ) : (
+                <p className="search-hint">Search the doubts and replies in your loaded room history.</p>
+              )}
             </div>
           </section>
         </div>

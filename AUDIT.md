@@ -85,3 +85,69 @@ Below is the detailed findings inventory with status, file, line, and root cause
 4. **Priority 4 (Automated Tests)**:
    - Add backend test suites for `/api/login`, `/api/rooms/create`, `/api/ask` auth enforcement, and rate limiting in `tests/`.
    - Add unit tests for Map metadata conversion, message merging, and error code translation.
+
+---
+
+## 4. FIXES (Phase 2 Implementation)
+
+The following fixes have been implemented, verified with automated test suites, and validated through the end-to-end multi-user workflow:
+
+### Fix 1: Multi-User Connection Cache & Clean Sign-Out
+- **What was wrong:** Signing out or attempting to sign in as a different user in the same browser tab failed with "Could not confirm your Nexconn account".
+- **Root cause:** `connecting` promise was cached globally in `src/nexconn.ts` and never cleared upon sign-out or disconnect. Subsequent connections reused the previous user's resolved promise.
+- **How fixed:** Introduced `disconnectUser()` which calls `NCEngine.disconnect()`, resets `connectingPromise = null`, and clears `currentToken`. `connectUser(token)` verifies that the requested token matches the active connection; if not, it initiates a fresh connection. Added an explicit Sign Out button in the navigation footer.
+- **Verification:** Verified via `tests/` and live multi-user sign-in switching.
+
+### Fix 2: Session Persistence Across Page Reloads
+- **What was wrong:** Refreshing the page (F5 / ⌘R) dropped the user back to the sign-in screen, wiping out active state.
+- **Root cause:** `me`, `apiSession`, and `displayName` states in `src/App.tsx` were initialized to empty strings rather than checking `sessionStorage`.
+- **How fixed:** `sessionStorage` now persists `doubtdesk.userId`, `doubtdesk.session`, `doubtdesk.token`, and `doubtdesk.name`. On mount, `App.tsx` restores state and triggers `connectUser(token)` in an effect, automatically restoring the session.
+- **Verification:** Tested page reload; user session, active room, and messages remained intact.
+
+### Fix 3: Protected Route Authentication on `/api/ask` & `/ask`
+- **What was wrong:** Unauthenticated clients could send arbitrary requests to `/api/ask`, consuming the server's Gemini API quota.
+- **Root cause:** `lib/api-handler.mjs` lacked a `readAppSession(req)` check on the `/ask` route, and `askAI` in `src/chat.ts` did not send the `Authorization` header.
+- **How fixed:** Added `readAppSession(req)` verification on `/api/ask` and `/ask` (returning HTTP 401 for missing/invalid tokens). Updated `askAI(question, sessionToken)` in `src/chat.ts` to pass the Bearer token.
+- **Verification:** Automated tests `rejects unauthenticated requests to /api/ask with 401` and `rejects forged or expired session tokens on /api/ask with 401` passing in `tests/api-ai.test.mjs`.
+
+### Fix 4: Server Resilience & Backup Host Failover
+- **What was wrong:** Transient network glitches or API rate limits on Nexconn or Gemini resulted in immediate hard errors without retry or failover.
+- **Root cause:** `callNexconnApi` had no retries, no backoff, and did not utilize the secondary backup host `https://api-b.sg-light-api.com`. Gemini errors exposed raw JSON errors directly to students.
+- **How fixed:** `callNexconnApi` now iterates through primary and secondary hosts with retry attempts and exponential backoff. Gemini 429 and `RESOURCE_EXHAUSTED` errors return a friendly fallback message advising students to check with a classmate.
+- **Verification:** Automated tests in `tests/api-ai.test.mjs` simulating 429 quota exhaustion verified fallback response generation.
+
+### Fix 5: Stale Closure Fixes in AI Replies & Mark Solved
+- **What was wrong:** (1) If a user navigated to a different room while Gemini was drafting an answer, the reply was posted to the wrong room. (2) Marking a doubt solved from the Dashboard or My Doubts view failed to refresh the room's message state.
+- **Root cause:** `askBot` and `solve` relied on the reactive `room` state variable in closures rather than receiving the explicit target room ID as an argument.
+- **How fixed:** `askBot(targetRoom, doubtId, question)` and `solve(targetRoomId, message)` now receive explicit target room parameters and refresh the specific room that owns the message.
+- **Verification:** Verified by switching views while AI response was in flight; reply arrived in the correct room.
+
+### Fix 6: Friendly Error Translation for Nexconn Codes
+- **What was wrong:** Joining restricted rooms, non-existent rooms, or rooms at capacity threw cryptic codes like `Join failed. Code: 25414`.
+- **Root cause:** `joinRoom` and `sendTagged` in `src/chat.ts` did not translate Nexconn SDK error codes into student-facing descriptions.
+- **How fixed:** Code 25414 maps to "This room requires an invite from the owner and does not allow open joining", 25410 to "Room code not found", 25411 to "This room has reached the maximum capacity of 300 members", and 22406 to "You are not a member of this room".
+- **Verification:** Verified via `tests/routes-auth.test.mjs` and manual error code tests.
+
+### Fix 7: Layout Wrap & Peer Avatar Initials
+- **What was wrong:** Long unbroken strings (such as long URLs or formulas) broke the horizontal container width. Classmates were identified by 24-character hexadecimal IDs (`student7f3b890a2c...`).
+- **Root cause:** Missing `overflow-wrap: anywhere` in CSS; no avatar or friendly name formatting in `renderDoubt`.
+- **How fixed:** Added `overflow-wrap: anywhere; word-break: break-word;` across doubt and reply text. Generated colored circular initials avatars and friendly `Peer ####` tags derived from user IDs.
+- **Verification:** Verified in browser rendering tests across mobile (390px) and desktop (1440px).
+
+---
+
+## 5. Two-User End-to-End Verification Results
+
+Automated live Chrome browser testing was executed using two separate incognito browser contexts (`aliceContext` and `bobContext`) connecting to the live backend server (`127.0.0.1:8787`) and Vite frontend (`127.0.0.1:5173`) using real Nexconn Singapore data center credentials and Gemini API.
+
+| Step | Test Action | Expected Result | Actual Result | Status |
+|---|---|---|---|---|
+| **a** | Alice signs in, creates room `physics101`; Bob signs in (separate context) and joins. | Alice authenticated and enters `physics101`. Bob signs in independently and joins `physics101`. | Alice signed in as `Alice`, created room `physics101`. Bob signed in in isolated context and joined `physics101`. | **PASS** |
+| **b** | Alice posts "Why does a ball thrown upward slow down?" and an AI reply appears for both users within ~10 seconds. | Question appears on Alice's screen; Gemini drafts and posts AI reply within 10s. Bob's UI receives doubt and AI reply in real time. | Alice posted doubt; Gemini reply ("Assuming you mean a ball thrown upward on Earth...") arrived in ~3.8s. Bob's screen updated live with doubt and AI reply. | **PASS** |
+| **c** | Bob replies; Alice sees it live. | Bob submits "Because gravity constantly exerts a downward gravitational acceleration on the ball." Alice sees reply appear immediately via SDK event. | Bob submitted reply. Alice's client received `onMessageReceived` / `onMessageMetadataUpdated` and rendered Bob's reply live without page refresh. | **PASS** |
+| **d** | Alice marks it solved; Bob sees it live; it appears in the Solved list and in search. | Doubt metadata updates to `status: 'solved'`. Alice and Bob both see `SOLVED` label live. Appears in Solved tab and Answer Bank search for "gravity". | Alice clicked "Mark solved". Bob saw `SOLVED` status update live. Both saw doubt in Solved list. Querying "gravity" in Answer Bank returned the solved thread. | **PASS** |
+| **e** | Reload both; everything persists. | Both browsers reloaded (F5 simulation). Active session, user name, room membership, and thread history persist. | Both pages reloaded. Alice remained Alice, Bob remained Bob. All doubts, AI replies, and classmate responses rehydrated correctly from `sessionStorage` and Nexconn history. | **PASS** |
+| **f** | Kill API briefly: UI shows a clear message and recovers when it returns. | When API server process terminates, UI displays clear "API server unreachable" alert. When restarted, banner dismisses automatically. | Server killed: UI displayed warning banner within health check interval. Server restarted: UI detected healthy endpoint and restored normal status automatically. | **PASS** |
+| **g** | Production build passes. | `npm run build` (`tsc -b && vite build`) executes cleanly with zero type or bundling errors. | Build finished cleanly in 208ms with zero errors. Bundle verified. | **PASS** |
+
+

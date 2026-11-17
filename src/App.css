@@ -309,6 +309,57 @@
   white-space: nowrap;
 }
 
+.signout-button {
+  margin-left: auto;
+  border: 0 !important;
+  background: transparent !important;
+  padding: 4px !important;
+  min-height: 28px !important;
+  color: var(--ink-muted) !important;
+  border-radius: 4px;
+}
+
+.signout-button:hover {
+  color: var(--accent) !important;
+}
+
+.avatar-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  flex: 0 0 22px;
+}
+
+.avatar-chip.ai-chip {
+  background: #3e7357;
+}
+
+.reply-author-lockup {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.connection-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  color: #8c5a14;
+  background: rgba(220, 148, 50, 0.12);
+  border: 1px solid rgba(220, 148, 50, 0.28);
+}
+
 .app-main {
   min-width: 0;
 }

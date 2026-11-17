@@ -43,9 +43,9 @@ async function postAPI(path: string, payload: Record<string, unknown>, sessionTo
           : res.status === 429
             ? 'Too many requests. Wait a minute and try again.'
             : path === '/api/rooms/create'
-              ? `Could not create the room: ${apiMessage}. Check the room code is unused and your invitee IDs are valid.`
+              ? `Could not create the room: ${apiMessage}. Check that the room code is unused.`
               : path === '/api/login' && apiMessage.includes('not configured')
-                ? 'Login is not configured. Set NEXCONN_APP_KEY and NEXCONN_APP_SECRET in .env.server, then restart.'
+                ? 'Login service is temporarily unconfigured. Please contact support.'
                 : apiMessage;
     throw new Error(message);
   }
@@ -93,7 +93,17 @@ export async function createRoom(
 
 export async function joinRoom(groupId: string) {
   const { code } = await new GroupChannel(groupId).join();
-  if (code !== 0 && code !== 25412) throw new Error(`Join failed. Code: ${code}`);
+  if (code === 0 || code === 25412) return; // 0 = joined, 25412 = already a member
+  if (code === 25414) {
+    throw new Error('This room requires an invite from the owner and does not allow open joining.');
+  }
+  if (code === 25410) {
+    throw new Error('Room code not found. Check the code and try again.');
+  }
+  if (code === 25411) {
+    throw new Error('This room has reached the maximum capacity of 300 members.');
+  }
+  throw new Error(`Could not join room (Code: ${code}).`);
 }
 
 export async function fetchRoomMessages(
@@ -109,23 +119,43 @@ export async function fetchRoomMessages(
   });
   const { code, data } = await query.loadNextPage();
   if (code === 22406) {
-    throw new Error('You are not a member of this room. Ask for an invitation or check the room code.');
+    throw new Error('You are not a member of this room. Ask for an invitation or join with a room code.');
   }
-  if (code !== 0) throw new Error(`Could not load room history. Code: ${code}`);
+  if (code !== 0) throw new Error(`Could not load room history (Code: ${code}).`);
   const list: RoomMessage[] = Array.isArray(data)
-    ? data as RoomMessage[]
-    : (data as { data?: RoomMessage[] })?.data ?? [];
+    ? (data as RoomMessage[])
+    : ((data as { data?: RoomMessage[] })?.data ?? []);
   return [...list].reverse(); // oldest first
 }
 
+// Client rate limiter: maximum 5 messages per second across all channels
+let lastSendTimestamps: number[] = [];
+async function throttleSend() {
+  const now = Date.now();
+  lastSendTimestamps = lastSendTimestamps.filter((t) => now - t < 1000);
+  if (lastSendTimestamps.length >= 5) {
+    const oldest = lastSendTimestamps[0];
+    const waitMs = Math.max(50, 1000 - (now - oldest) + 50);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  lastSendTimestamps.push(Date.now());
+}
+
 async function sendTagged(groupId: string, text: string, meta: Record<string, string>) {
+  await throttleSend();
   const { code, data } = await new GroupChannel(groupId).sendMessage(
     new SendTextMessageParams({ text })
   );
-  if (code !== 0 || !data) throw new Error(`Send failed. Code: ${code}`);
+  if (code !== 0 || !data) {
+    if (code === 22406) throw new Error('You are not a member of this room. Please join first.');
+    if (code === 30001 || code === 30002) throw new Error('Connection paused. Reconnecting to chat...');
+    throw new Error(`Send failed (Code: ${code})`);
+  }
   const message = data as RoomMessage;
   const res = await message.setMetadata(meta);
-  if (res.code !== 0) throw new Error(`Tagging failed. Code: ${res.code}`);
+  if (res.code !== 0) {
+    console.warn(`Tagging failed with code ${res.code}, message sent.`);
+  }
   return message;
 }
 
@@ -138,8 +168,8 @@ export const postReply = (groupId: string, doubtId: string, text: string): Promi
 export const postAIReply = (groupId: string, doubtId: string, text: string): Promise<RoomMessage> =>
   sendTagged(groupId, text, { kind: 'reply', replyTo: doubtId, author: 'ai' });
 
-export async function askAI(question: string): Promise<string> {
-  const body = await postAPI('/api/ask', { question });
+export async function askAI(question: string, sessionToken?: string): Promise<string> {
+  const body = await postAPI('/api/ask', { question }, sessionToken);
   if (!body || typeof body !== 'object' || !('answer' in body) || typeof body.answer !== 'string') {
     throw new Error('AI response was incomplete');
   }
@@ -148,11 +178,11 @@ export async function askAI(question: string): Promise<string> {
 
 export async function markSolved(message: RoomMessage) {
   const res = await message.setMetadata({ status: 'solved' });
-  if (res.code !== 0) throw new Error(`Update failed. Code: ${res.code}`);
+  if (res.code !== 0) throw new Error(`Could not mark doubt as solved (Code: ${res.code})`);
 }
 
 export const textOf = (m: RoomMessage): string =>
-  m?.content?.text ?? m?.content?.content ?? JSON.stringify(m?.content ?? '');
+  m?.content?.text ?? m?.content?.content ?? (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? ''));
 
 export const metaOf = (m: RoomMessage): Record<string, string> => {
   const meta = m?.metadata;
