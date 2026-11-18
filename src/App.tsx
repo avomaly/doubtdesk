@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpRight,
   BookOpen,
+  Check,
   ChevronRight,
   DoorOpen,
+  Flame,
+  HelpCircle,
   LayoutDashboard,
   Library,
   LogOut,
@@ -11,6 +14,7 @@ import {
   NotebookPen,
   Plus,
   Search,
+  Sparkles,
   Sun,
   WifiOff,
   X,
@@ -122,13 +126,26 @@ function userColor(id: string) {
     hash = (hash << 5) - hash + id.charCodeAt(i);
   }
   const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 48%, 42%)`;
+  return `hsl(${hue}, 46%, 42%)`;
 }
 
 function userInitials(id: string) {
   if (!id) return 'ST';
   const clean = id.replace(/^student_?/, '');
   return clean.slice(0, 2).toUpperCase() || 'ST';
+}
+
+function greetingMessage(name: string) {
+  const hour = new Date().getHours();
+  const timeGreeting =
+    hour < 12
+      ? 'Good morning'
+      : hour < 17
+        ? 'Good afternoon'
+        : hour < 22
+          ? 'Good evening'
+          : 'Late study session';
+  return `${timeGreeting}, ${name || 'student'}.`;
 }
 
 function studyStreakDays(messages: RoomMessage[], userId: string) {
@@ -156,6 +173,76 @@ function aiText(text: string) {
   return text
     .replace(/\s*\n*\(AI answer - confirm with your seniors or teacher\.\)$/i, '')
     .replace(/\s*\n*Check with a senior or your teacher\.$/i, '');
+}
+
+function EmptyIllustration({ type }: { type: 'notebook' | 'archive' | 'search' }) {
+  if (type === 'notebook') {
+    return (
+      <svg
+        className="empty-svg"
+        width="60"
+        height="60"
+        viewBox="0 0 64 64"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M14 10h38a4 4 0 0 1 4 4v36a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V14a4 4 0 0 1 4-4z" />
+        <path d="M24 10v44" />
+        <path d="M8 18h16" />
+        <path d="M8 28h16" />
+        <path d="M8 38h16" />
+        <path d="M32 22h16" />
+        <path d="M32 30h12" />
+        <path d="M32 38h8" />
+      </svg>
+    );
+  }
+  if (type === 'archive') {
+    return (
+      <svg
+        className="empty-svg"
+        width="60"
+        height="60"
+        viewBox="0 0 64 64"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="14" y="12" width="36" height="14" rx="2" />
+        <rect x="14" y="26" width="36" height="14" rx="2" />
+        <rect x="14" y="40" width="36" height="14" rx="2" />
+        <line x1="28" y1="19" x2="36" y2="19" />
+        <line x1="28" y1="33" x2="36" y2="33" />
+        <line x1="28" y1="47" x2="36" y2="47" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      className="empty-svg"
+      width="60"
+      height="60"
+      viewBox="0 0 64 64"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="28" cy="28" r="16" />
+      <line x1="40" y1="40" x2="52" y2="52" />
+      <path d="M22 28h12" />
+      <path d="M28 22v12" />
+    </svg>
+  );
 }
 
 function App() {
@@ -200,6 +287,7 @@ function App() {
   const [sending, setSending] = useState(false);
   const [solvingMessage, setSolvingMessage] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   const signOut = useCallback(async () => {
     sessionStorage.removeItem('doubtdesk.name');
@@ -278,7 +366,7 @@ function App() {
   }, []);
 
   const refreshRoom = useCallback(async (id: string) => {
-    if (!id) return;
+    if (!id || connectionState !== 'connected') return;
     setLoadingRooms((current) => new Set(current).add(id));
     try {
       const latest = await fetchRoomMessages(id);
@@ -304,7 +392,7 @@ function App() {
         return next;
       });
     }
-  }, []);
+  }, [connectionState]);
 
   const refreshAllRooms = useCallback(async () => {
     if (!rooms.length) return;
@@ -312,12 +400,12 @@ function App() {
   }, [refreshRoom, rooms]);
 
   useEffect(() => {
-    if (!me) return;
+    if (!me || connectionState !== 'connected') return;
     void refreshAllRooms();
     return onActivity(() => {
       void refreshAllRooms();
     });
-  }, [me, refreshAllRooms]);
+  }, [me, connectionState, refreshAllRooms]);
 
   const roomEntries = useMemo(
     () => rooms.map((entry) => ({ ...entry, messages: messagesByRoom[entry.id] ?? [] })),
@@ -351,7 +439,6 @@ function App() {
           replies: repliesByDoubt.get(doubt.messageId) || [],
         }));
 
-        // Preserve orphan replies so peer messages are never silently lost
         if (orphanReplies.length > 0) {
           orphanReplies.forEach((reply) => {
             const meta = metaOf(reply);
@@ -359,7 +446,7 @@ function App() {
               messageId: meta.replyTo || reply.messageId,
               sentTime: reply.sentTime - 1,
               senderUserId: 'classmate',
-              content: { text: '(Thread question from history)' },
+              content: { text: '(Earlier doubt from history)' },
               metadata: { kind: 'doubt', status: 'open' },
               setMetadata: async () => ({ code: 0 }),
             };
@@ -487,7 +574,7 @@ function App() {
     });
 
   async function askBot(targetRoom: string, doubtId: string, question: string) {
-    setAiStatus('AI is drafting a first answer...');
+    setAiStatus('AI is drafting a first answer…');
     try {
       const answer = await askAI(question, apiSession);
       await postAIReply(targetRoom, doubtId, answer);
@@ -567,6 +654,19 @@ function App() {
     setRoom(id);
     setPage('room');
     setView('open');
+    if (connectionState === 'connected') {
+      void refreshRoom(id);
+    }
+  }
+
+  function startDoubtInRoom(targetRoomId?: string) {
+    const roomId = targetRoomId || (rooms.length > 0 ? rooms[0].id : '');
+    if (roomId) {
+      openRoom(roomId);
+      setTimeout(() => composerTextareaRef.current?.focus(), 150);
+    } else {
+      selectNavigation('rooms');
+    }
   }
 
   function selectNavigation(next: PageKey) {
@@ -597,19 +697,36 @@ function App() {
     const isMyDoubt = entry.doubt.senderUserId === me;
 
     return (
-      <article className="doubt-entry" key={entry.doubt.messageId}>
+      <article className={solved ? 'doubt-entry is-resolved' : 'doubt-entry'} key={entry.doubt.messageId}>
         <div className="doubt-meta">
           <div className="doubt-meta-left">
             <span className={solved ? 'status-label is-solved' : 'status-label'}>
-              {solved ? 'SOLVED' : 'OPEN'}
+              {solved ? (
+                <>
+                  <svg className="solved-check-icon" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                    <path
+                      d="M3 8.5L6.5 12L13 4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  SOLVED
+                </>
+              ) : (
+                'OPEN'
+              )}
             </span>
             <div
               className="avatar-chip"
               style={{ backgroundColor: userColor(entry.doubt.senderUserId) }}
+              title={`Student ${entry.doubt.senderUserId}`}
             >
               {userInitials(entry.doubt.senderUserId)}
             </div>
-            <span>{isMyDoubt ? 'You' : `Peer ${entry.doubt.senderUserId.slice(-4)}`}</span>
+            <span className="author-name">{isMyDoubt ? 'You' : `Peer ${entry.doubt.senderUserId.slice(-4)}`}</span>
           </div>
           <time dateTime={new Date(entry.doubt.sentTime).toISOString()}>
             {formatTime(entry.doubt.sentTime)}
@@ -618,6 +735,7 @@ function App() {
         <h3 className="doubt-title">{textOf(entry.doubt)}</h3>
         {showRoom && (
           <button className="room-context" onClick={() => openRoom(entry.room.id)}>
+            <span className={`room-dot ${subjectClass(entry.room.name)}`} />
             {entry.room.name}
             <ArrowUpRight size={13} strokeWidth={1.5} />
           </button>
@@ -646,19 +764,27 @@ function App() {
                         {isAI ? 'DoubtDesk AI' : isMe ? 'You' : `Peer ${reply.senderUserId.slice(-4)}`}
                       </strong>
                     </div>
-                    {isAI && <span className="ai-badge">AI DRAFT</span>}
+                    {isAI && (
+                      <span className="ai-badge">
+                        <Sparkles size={10} strokeWidth={2} /> AI DRAFT
+                      </span>
+                    )}
                     <time dateTime={new Date(reply.sentTime).toISOString()}>
                       {formatTime(reply.sentTime)}
                     </time>
                   </div>
                   <p>{isAI ? aiText(textOf(reply)) : textOf(reply)}</p>
-                  {isAI && <p className="ai-note">{AI_NOTE}</p>}
+                  {isAI && (
+                    <p className="ai-note">
+                      <HelpCircle size={12} strokeWidth={1.5} /> {AI_NOTE}
+                    </p>
+                  )}
                 </article>
               );
             })}
           </div>
         ) : (
-          <p className="no-replies">No replies yet.</p>
+          <p className="no-replies">No classmate replies yet.</p>
         )}
         <div className="doubt-actions">
           <button
@@ -666,6 +792,7 @@ function App() {
             onClick={() => {
               if (page !== 'room') openRoom(entry.room.id);
               setReplyTo(entry.doubt.messageId);
+              setTimeout(() => composerTextareaRef.current?.focus(), 100);
             }}
             disabled={sending}
           >
@@ -673,10 +800,11 @@ function App() {
           </button>
           {!solved && isMyDoubt && (
             <button
-              className="text-action"
+              className="solve-action-button"
               onClick={() => void solve(entry.room.id, entry.doubt)}
               disabled={solvingMessage !== null}
             >
+              <Check size={13} strokeWidth={2} />
               {solvingMessage === entry.doubt.messageId ? 'Saving…' : 'Mark solved'}
             </button>
           )}
@@ -696,7 +824,7 @@ function App() {
           aria-selected={view === 'open'}
           onClick={() => setView('open')}
         >
-          Open <span>{openCount}</span>
+          Open doubts <span>{openCount}</span>
         </button>
         <button
           className={view === 'solved' ? 'status-tab active' : 'status-tab'}
@@ -704,15 +832,16 @@ function App() {
           aria-selected={view === 'solved'}
           onClick={() => setView('solved')}
         >
-          Solved <span>{solvedCount}</span>
+          Solved threads <span>{solvedCount}</span>
         </button>
       </div>
     );
   }
 
-  function renderEmpty(title: string, detail: string) {
+  function renderEmpty(title: string, detail: string, type: 'notebook' | 'archive' | 'search' = 'notebook') {
     return (
-      <div className="empty-state">
+      <div className="empty-state glass">
+        <EmptyIllustration type={type} />
         <h3>{title}</h3>
         <p>{detail}</p>
       </div>
@@ -724,13 +853,13 @@ function App() {
       {!me ? (
         <main className="login-page">
           <div className="login-brand">
-            <NotebookPen size={19} strokeWidth={1.5} />
+            <NotebookPen size={22} strokeWidth={1.5} />
             <span>DoubtDesk</span>
           </div>
           <section className="login-panel glass-strong">
-            <p className="section-kicker">STUDY ROOMS</p>
-            <h1>Sign in</h1>
-            <p className="login-description">Use a display name your classmates recognize.</p>
+            <p className="section-kicker">STUDY ROOMS & COMMUNITY DOUBTS</p>
+            <h1>Enter the study desk</h1>
+            <p className="login-description">Use a display name your classmates and peers recognize.</p>
             {notice && (
               <p className="notice glass-strong" role="alert">
                 {notice}
@@ -753,16 +882,16 @@ function App() {
                 id="display-name"
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="e.g. Maya"
+                placeholder="e.g. Maya or Alex"
                 maxLength={40}
                 autoComplete="nickname"
                 required
               />
               <button className="primary-button" type="submit" disabled={authenticating}>
-                {authenticating ? 'Signing in…' : 'Continue'}
+                {authenticating ? 'Signing in…' : 'Continue to Study Desk'}
               </button>
             </form>
-            <p className="login-footnote">No password needed for this demo.</p>
+            <p className="login-footnote">No password needed for this course demo.</p>
           </section>
           <button
             className="login-theme"
@@ -787,8 +916,13 @@ function App() {
         <div className="app-layout">
           <aside className="desktop-sidebar glass">
             <div className="brand-lockup">
-              <NotebookPen size={19} strokeWidth={1.5} />
-              <span>DoubtDesk</span>
+              <div className="brand-icon-wrap">
+                <NotebookPen size={18} strokeWidth={1.5} />
+              </div>
+              <div className="brand-text">
+                <span className="brand-name">DoubtDesk</span>
+                <span className="brand-tag">Study Desk</span>
+              </div>
             </div>
             <nav className="primary-nav" aria-label="Main navigation">
               {PRIMARY_NAV.map((item) => {
@@ -843,11 +977,17 @@ function App() {
               </div>
             </div>
             <div className="sidebar-account">
-              <span className="account-mark">{displayName.slice(0, 1).toUpperCase() || 'S'}</span>
+              <div
+                className="account-mark"
+                style={{ backgroundColor: userColor(me) }}
+                title={`User ID: ${me}`}
+              >
+                {displayName.slice(0, 1).toUpperCase() || 'S'}
+              </div>
               <span className="account-name">{displayName || 'Student'}</span>
               <button
                 className="signout-button"
-                title="Sign out"
+                title="Sign out of DoubtDesk"
                 onClick={() => void signOut()}
                 aria-label="Sign out"
               >
@@ -859,7 +999,7 @@ function App() {
           <div className="app-main">
             <header className="topbar glass">
               <div className="topbar-title">
-                <p className="section-kicker">{page === 'room' ? 'ROOM' : 'DOUBTDESK'}</p>
+                <p className="section-kicker">{page === 'room' ? 'ACTIVE ROOM' : 'DOUBTDESK'}</p>
                 <h1>{currentTitle || 'Rooms'}</h1>
               </div>
               <div className="topbar-actions">
@@ -870,7 +1010,7 @@ function App() {
                   onClick={() => setSearchOpen(true)}
                 >
                   <Search size={16} strokeWidth={1.5} />
-                  <span>Search</span>
+                  <span>Search bank</span>
                   <kbd>⌘K</kbd>
                 </button>
                 <button
@@ -916,58 +1056,72 @@ function App() {
               )}
               {aiStatus && (
                 <p className="ai-status" role="status">
-                  {aiStatus}
+                  <Sparkles size={14} className="sparkle-spin" /> {aiStatus}
                 </p>
               )}
 
               {page === 'dashboard' && (
                 <section className="reading-column">
-                  <p className="page-description">Recent activity from rooms you can access.</p>
                   <div className="dashboard-greeting glass">
-                    <p className="section-kicker">YOUR STUDY DESK</p>
-                    <h2>Good to see you, {displayName || 'student'}.</h2>
-                    <p>
-                      {needsAnswer.length
-                        ? `${needsAnswer.length} ${needsAnswer.length === 1 ? 'doubt has' : 'doubts have'} no peer reply yet.`
-                        : 'No doubts are waiting for a peer reply.'}
-                    </p>
+                    <div className="hero-text">
+                      <p className="section-kicker">YOUR STUDY DESK</p>
+                      <h2>{greetingMessage(displayName)}</h2>
+                      <p>
+                        {needsAnswer.length
+                          ? `${needsAnswer.length} ${needsAnswer.length === 1 ? 'doubt has' : 'doubts have'} no peer reply yet. Jump in to help a peer!`
+                          : 'All current doubts have peer replies. Ask your next question or review solved answers.'}
+                      </p>
+                    </div>
+                    <div className="hero-action">
+                      <button className="primary-button hero-ask-btn" onClick={() => startDoubtInRoom()}>
+                        <Plus size={16} strokeWidth={1.5} />
+                        Ask a doubt
+                      </button>
+                    </div>
                   </div>
+
                   {Object.entries(historyErrors).map(([id, message]) => (
                     <p className="error-message glass-strong" role="alert" key={id}>
                       {rooms.find((entry) => entry.id === id)?.name ?? id}: {message}
                     </p>
                   ))}
-                  <div className="metrics-row" aria-label="Room summary">
-                    <div className="metric">
+
+                  <div className="metrics-row" aria-label="Study summary">
+                    <div className="metric glass">
                       <span>ROOMS</span>
                       <strong>{rooms.length}</strong>
                     </div>
-                    <div className="metric">
+                    <div className="metric glass">
                       <span>OPEN DOUBTS</span>
                       <strong>{openDoubts.length}</strong>
                     </div>
-                    <div className="metric">
-                      <span>NEED A REPLY</span>
-                      <strong>{needsAnswer.length}</strong>
+                    <div className="metric glass">
+                      <span>NEED REPLY</span>
+                      <strong className={needsAnswer.length > 0 ? 'text-accent' : undefined}>
+                        {needsAnswer.length}
+                      </strong>
                     </div>
-                    <div className="metric">
+                    <div className="metric glass">
                       <span>SOLVED</span>
-                      <strong>{solvedDoubts.length}</strong>
+                      <strong className="text-solved">{solvedDoubts.length}</strong>
                     </div>
-                    <div className="metric streak-metric">
-                      <span>STUDY STREAK</span>
+                    <div className="metric streak-metric glass">
+                      <span>HELPING STREAK</span>
                       <strong>
+                        <Flame size={16} className="flame-icon" strokeWidth={2} />
                         {studyStreak} <small>{studyStreak === 1 ? 'day' : 'days'}</small>
                       </strong>
                     </div>
                   </div>
+
                   <div className="section-heading">
                     <div>
-                      <p className="section-kicker">OPEN DOUBTS</p>
-                      <h2>Needs an answer</h2>
+                      <p className="section-kicker">UNANSWERED PEER QUESTIONS</p>
+                      <h2>Waiting for a classmate</h2>
                     </div>
                     <span className="section-count">{needsAnswer.length}</span>
                   </div>
+
                   {loadingRooms.size > 0 && doubtEntries.length === 0 ? (
                     <p className="state-message">Loading room history…</p>
                   ) : needsAnswer.length > 0 ? (
@@ -976,15 +1130,17 @@ function App() {
                     </div>
                   ) : (
                     renderEmpty(
-                      rooms.length ? 'No doubts need a reply.' : 'No rooms yet.',
+                      rooms.length ? 'No doubts need a reply.' : 'No study rooms joined yet.',
                       rooms.length
                         ? 'New questions without a classmate reply will appear here.'
-                        : 'Create a subject room or join one with a room code.',
+                        : 'Create a course room or join one with your classmates’ room code.',
+                      'notebook',
                     )
                   )}
+
                   {rooms.length > 0 && (
                     <button className="inline-link" onClick={() => selectNavigation('rooms')}>
-                      View rooms <ChevronRight size={15} strokeWidth={1.5} />
+                      Browse all rooms <ChevronRight size={15} strokeWidth={1.5} />
                     </button>
                   )}
                 </section>
@@ -993,14 +1149,14 @@ function App() {
               {page === 'rooms' && (
                 <section className="wide-column">
                   <p className="page-description">
-                    Create a subject room or join with a classmate’s room code.
+                    Create a subject room for your course or join with a classmate’s code.
                   </p>
                   <div className="rooms-layout">
                     <div className="rooms-panel glass">
                       <div className="section-heading">
                         <div>
-                          <p className="section-kicker">SUBJECTS</p>
-                          <h2>Your rooms</h2>
+                          <p className="section-kicker">SUBJECT ROOMS</p>
+                          <h2>Enrolled channels</h2>
                         </div>
                         <span className="section-count">{rooms.length}</span>
                       </div>
@@ -1029,11 +1185,11 @@ function App() {
                                 </span>
                                 <span className="room-directory-main">
                                   <strong>{entry.name}</strong>
-                                  <small>{entry.id}</small>
+                                  <small>Code: {entry.id}</small>
                                 </span>
                                 <span className="room-directory-counts">
-                                  <span>{openCount} open</span>
-                                  <span>{solvedCount} solved</span>
+                                  <span className="badge-open">{openCount} open</span>
+                                  <span className="badge-solved">{solvedCount} solved</span>
                                 </span>
                                 <ArrowUpRight size={15} strokeWidth={1.5} />
                               </button>
@@ -1042,8 +1198,9 @@ function App() {
                         </div>
                       ) : (
                         renderEmpty(
-                          'No rooms yet.',
-                          'Create a room for your course or enter a code from a classmate.',
+                          'No rooms joined yet.',
+                          'Create a room for your study group or enter an invite code.',
+                          'notebook',
                         )
                       )}
                     </div>
@@ -1056,33 +1213,33 @@ function App() {
                           void create();
                         }}
                       >
-                        <p className="section-kicker">NEW ROOM</p>
+                        <p className="section-kicker">NEW COURSE ROOM</p>
                         <h2>Create a room</h2>
-                        <label htmlFor="room-name">Subject name</label>
+                        <label htmlFor="room-name">Course subject name</label>
                         <input
                           id="room-name"
                           value={roomName}
                           onChange={(event) => setRoomName(event.target.value)}
-                          placeholder="e.g. Physics 101"
+                          placeholder="e.g. Physics 101 or Organic Chem"
                           maxLength={64}
                         />
-                        <label htmlFor="room-code">Room code</label>
+                        <label htmlFor="room-code">Room code (unique)</label>
                         <input
                           id="room-code"
                           value={roomInput}
                           onChange={(event) => setRoomInput(event.target.value)}
-                          placeholder="Letters and numbers"
+                          placeholder="Letters and numbers only"
                           maxLength={64}
                           required
                         />
                         <label htmlFor="room-invitees">
-                          Invitee IDs <span>(optional)</span>
+                          Invitee student IDs <span>(optional)</span>
                         </label>
                         <input
                           id="room-invitees"
                           value={invitees}
                           onChange={(event) => setInvitees(event.target.value)}
-                          placeholder="Separate IDs with commas"
+                          placeholder="student_alice, student_bob"
                         />
                         <div className="preset-list" aria-label="Preset subjects">
                           {PRESET_SUBJECTS.map((preset) => (
@@ -1092,7 +1249,7 @@ function App() {
                               type="button"
                               onClick={() => {
                                 setRoomName(preset.name);
-                                setRoomInput(`${preset.code}${Date.now().toString(36).slice(-5)}`);
+                                setRoomInput(`${preset.code}${Date.now().toString(36).slice(-4)}`);
                               }}
                             >
                               {preset.name}
@@ -1101,7 +1258,7 @@ function App() {
                         </div>
                         <button className="primary-button" type="submit" disabled={roomWorking}>
                           <Plus size={15} strokeWidth={1.5} />
-                          {roomWorking ? 'Creating…' : 'Create room'}
+                          {roomWorking ? 'Creating…' : 'Create course room'}
                         </button>
                       </form>
 
@@ -1112,14 +1269,14 @@ function App() {
                           void join();
                         }}
                       >
-                        <p className="section-kicker">JOIN ROOM</p>
-                        <h2>Enter a room code</h2>
+                        <p className="section-kicker">ENTER EXISTING ROOM</p>
+                        <h2>Join with room code</h2>
                         <label htmlFor="join-code">Room code or invite link</label>
                         <input
                           id="join-code"
                           value={joinCode}
                           onChange={(event) => setJoinCode(event.target.value)}
-                          placeholder="Paste a code or link"
+                          placeholder="e.g. physics101"
                           required
                         />
                         <button className="secondary-button" type="submit" disabled={roomWorking}>
@@ -1136,9 +1293,12 @@ function App() {
                 <section className="reading-column room-page">
                   {activeRoom ? (
                     <>
-                      <div className="room-heading">
+                      <div className="room-heading glass">
                         <div>
-                          <p className="section-kicker">ROOM CODE · {activeRoom.id}</p>
+                          <p className="section-kicker">
+                            <span className={`room-dot ${subjectClass(activeRoom.name)}`} />
+                            COURSE CODE · {activeRoom.id}
+                          </p>
                           <h2>{activeRoom.name}</h2>
                         </div>
                         <button
@@ -1148,19 +1308,22 @@ function App() {
                             link.searchParams.set('room', room);
                             void navigator.clipboard
                               .writeText(link.toString())
-                              .then(() => setNotice('Invite link copied.'))
+                              .then(() => setNotice('Invite link copied to clipboard.'))
                               .catch(() => setNotice(`Share this room code: ${room}`));
                           }}
                         >
                           Share room
                         </button>
                       </div>
+
                       {renderStatusTabs(activeEntries)}
+
                       {historyErrors[room] && (
                         <p className="error-message glass-strong" role="alert">
                           {historyErrors[room]}
                         </p>
                       )}
+
                       {loadingRooms.has(room) && !messagesByRoom[room] ? (
                         <p className="state-message">Loading room history…</p>
                       ) : filteredRoomEntries.length ? (
@@ -1173,19 +1336,22 @@ function App() {
                             ? 'No solved doubts in this room yet.'
                             : 'No open doubts in this room.',
                           view === 'solved'
-                            ? 'Solve a doubt and it will show up here.'
-                            : 'Ask a doubt to start the discussion.',
+                            ? 'Mark a doubt solved and its solution will be stored here.'
+                            : 'Post a question below to start the peer thread.',
+                          'notebook',
                         )
                       )}
+
                       {hasOlder && (
                         <button
                           className="secondary-button load-more"
                           onClick={() => void loadOlder()}
                           disabled={loadingOlder}
                         >
-                          {loadingOlder ? 'Loading…' : 'Load older doubts'}
+                          {loadingOlder ? 'Loading older history…' : 'Load older doubts'}
                         </button>
                       )}
+
                       {view === 'open' && (
                         <form
                           className="composer glass-strong"
@@ -1196,7 +1362,7 @@ function App() {
                         >
                           {replyTo && (
                             <div className="replying-to">
-                              <span>Replying to a doubt</span>
+                              <span>Replying to thread #{replyTo.slice(-6)}</span>
                               <button
                                 type="button"
                                 className="text-action"
@@ -1207,17 +1373,18 @@ function App() {
                             </div>
                           )}
                           <textarea
+                            ref={composerTextareaRef}
                             value={text}
                             onChange={(event) => setText(event.target.value)}
-                            placeholder={replyTo ? 'Write a reply' : 'Ask a doubt'}
+                            placeholder={replyTo ? 'Write a peer explanation or solution…' : 'Ask your course doubt (e.g. Why does a ball thrown upward slow down?)…'}
                             maxLength={2000}
                             rows={3}
                           />
                           <div className="composer-footer">
-                            <span>
+                            <span className="composer-hint">
                               {replyTo
-                                ? 'Replies stay with their doubt.'
-                                : 'Keep the question specific.'}
+                                ? 'Classmate replies stay bound to this doubt.'
+                                : 'Gemini will provide a first draft within seconds.'}
                             </span>
                             <button
                               className="primary-button"
@@ -1229,8 +1396,8 @@ function App() {
                                 : connectionState !== 'connected'
                                   ? 'Connecting…'
                                   : replyTo
-                                    ? 'Send reply'
-                                    : 'Ask a doubt'}
+                                    ? 'Post reply'
+                                    : 'Post doubt'}
                             </button>
                           </div>
                         </form>
@@ -1238,8 +1405,9 @@ function App() {
                     </>
                   ) : (
                     renderEmpty(
-                      'Choose a room.',
-                      'Open a subject room from the navigation or join with a room code.',
+                      'Select a course room.',
+                      'Open a subject room from the left navigation or join with a room code.',
+                      'notebook',
                     )
                   )}
                 </section>
@@ -1247,7 +1415,7 @@ function App() {
 
               {page === 'my-doubts' && (
                 <section className="reading-column">
-                  <p className="page-description">Doubts you started across your rooms.</p>
+                  <p className="page-description">Questions you initiated across your enrolled subjects.</p>
                   {renderStatusTabs(myDoubts)}
                   {filteredMyDoubts.length ? (
                     <div className="doubt-list glass-strong">
@@ -1257,10 +1425,11 @@ function App() {
                     renderEmpty(
                       view === 'solved'
                         ? 'No solved doubts from you yet.'
-                        : 'You have not asked a doubt yet.',
+                        : 'You haven’t posted any doubts yet.',
                       view === 'solved'
-                        ? 'Solved doubts you started will appear here.'
-                        : 'Open a room and ask a course question.',
+                        ? 'Solved threads you started will appear here in your answer archive.'
+                        : 'Open a room and post your course questions to get help.',
+                      'notebook',
                     )
                   )}
                 </section>
@@ -1269,15 +1438,15 @@ function App() {
               {page === 'answer-bank' && (
                 <section className="reading-column">
                   <p className="page-description">
-                    Solved questions and their replies from loaded room history.
+                    Searchable repository of resolved doubts and peer solutions across all subjects.
                   </p>
-                  <label className="search-field">
+                  <label className="search-field glass">
                     <Search size={16} strokeWidth={1.5} />
                     <input
                       type="search"
                       value={searchTerm}
                       onChange={(event) => setSearchTerm(event.target.value)}
-                      placeholder="Search solved doubts and replies"
+                      placeholder="Search solved answers, formulas, or keywords…"
                       aria-label="Search solved doubts and replies"
                     />
                   </label>
@@ -1287,10 +1456,11 @@ function App() {
                     </div>
                   ) : (
                     renderEmpty(
-                      normalizedSearch ? 'No matching solved answers.' : 'No solved doubts yet.',
+                      normalizedSearch ? 'No matching solved answers found.' : 'No solved doubts in the answer bank yet.',
                       normalizedSearch
-                        ? 'Try another phrase or load more room history.'
-                        : 'Solve one and it will show up here.',
+                        ? 'Try different search keywords or load older history in your rooms.'
+                        : 'When doubts are marked solved by the asker, they automatically archive here.',
+                      'archive',
                     )
                   )}
                   {hasOlder && (
@@ -1299,7 +1469,7 @@ function App() {
                       onClick={() => void loadOlder()}
                       disabled={loadingOlder}
                     >
-                      {loadingOlder ? 'Loading…' : 'Load older room history'}
+                      {loadingOlder ? 'Loading older history…' : 'Load more room history'}
                     </button>
                   )}
                 </section>
@@ -1339,7 +1509,7 @@ function App() {
             className="search-dialog glass-strong"
             role="dialog"
             aria-modal="true"
-            aria-label="Search DoubtDesk"
+            aria-label="Search DoubtDesk Answer Bank"
           >
             <div className="search-dialog-input">
               <Search size={18} strokeWidth={1.5} />
@@ -1347,7 +1517,7 @@ function App() {
                 ref={searchInputRef}
                 value={globalSearch}
                 onChange={(event) => setGlobalSearch(event.target.value)}
-                placeholder="Search doubts and replies"
+                placeholder="Search across all doubts and answers…"
                 aria-label="Search doubts and replies"
               />
               <button
@@ -1386,10 +1556,10 @@ function App() {
                     </button>
                   ))
                 ) : (
-                  <p className="search-hint">No matching loaded doubts or replies.</p>
+                  <p className="search-hint">No matching doubts or answers found.</p>
                 )
               ) : (
-                <p className="search-hint">Search the doubts and replies in your loaded room history.</p>
+                <p className="search-hint">Type any formula, concept, or doubt to search loaded room history.</p>
               )}
             </div>
           </section>
