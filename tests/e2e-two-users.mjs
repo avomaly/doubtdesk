@@ -129,7 +129,7 @@ async function runE2E() {
     console.log('Step d: Alice marks it solved; Bob sees it live; it appears in Solved list and search.');
     // Alice clicks Mark solved
     await alicePage.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button.text-action'));
+      const btns = Array.from(document.querySelectorAll('button.solve-action-button, button.text-action'));
       const solveBtn = btns.find((b) => b.innerText.includes('Mark solved'));
       if (!solveBtn) throw new Error('Mark solved button not found on Alice page');
       solveBtn.click();
@@ -168,8 +168,8 @@ async function runE2E() {
     console.log('✔ Doubt found in Answer bank search for "gravity"');
 
     console.log('Step e: Reload both; everything persists.');
-    await alicePage.reload();
-    await bobPage.reload();
+    await alicePage.reload({ waitUntil: 'networkidle0' });
+    await bobPage.reload({ waitUntil: 'networkidle0' });
 
     await alicePage.waitForSelector('.desktop-sidebar', { timeout: 10000 });
     await bobPage.waitForSelector('.desktop-sidebar', { timeout: 10000 });
