@@ -582,7 +582,17 @@ function App() {
       setAiStatus('');
     } catch (error) {
       console.error('AI answer failed:', error);
-      setAiStatus("AI couldn't answer. A senior can help.");
+      setAiStatus("AI couldn't answer, a classmate will help.");
+      try {
+        await postAIReply(
+          targetRoom,
+          doubtId,
+          "AI couldn't answer, a classmate will help.\n\nCheck with a senior or your teacher."
+        );
+        await refreshRoom(targetRoom);
+      } catch (postErr) {
+        console.error('Fallback AI reply failed:', postErr);
+      }
     }
   }
 

@@ -37,7 +37,9 @@ async function request(method, path, body, headers = {}) {
 test('GET /api/health returns 200 { ok: true }', async () => {
   const { status, body } = await request('GET', '/api/health');
   assert.equal(status, 200);
-  assert.deepEqual(body, { ok: true });
+  assert.equal(body.ok, true);
+  assert.equal(body.hasAppKey, true);
+  assert.equal(body.hasAppSecret, true);
 });
 
 test('POST /api/login rejects empty or control character display names', async () => {

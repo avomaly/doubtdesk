@@ -1,109 +1,155 @@
 # DoubtDesk
 
-**Questions that find an answer.** DoubtDesk is a campus study chat where every question has a clear lifecycle: ask, get a fast AI first answer, discuss with classmates, mark solved, and find it later.
+**Live Application:** [https://doubtdesk-silk.vercel.app](https://doubtdesk-silk.vercel.app)
 
-## The problem
+> A campus study chat built for the **Nexconn Build Challenge 2026** where every question becomes a tracked, resolved thread instead of disappearing into an endless group chat.
 
-Useful questions disappear in busy class group chats. The same doubt gets asked again, and students cannot tell which answers were checked or resolved.
+---
 
-## The solution
+## The Problem
 
-DoubtDesk turns each question into a threaded, searchable doubt. Subject rooms keep discussions together. An AI helper offers a concise first response, peers add context, and the asker marks the doubt solved so it becomes part of the room's answer bank.
+In busy college group chats (WhatsApp, Discord, Telegram), academic questions get asked, pushed off the screen within minutes by banter, and buried forever. The same doubts get repeated weekly before exams, and students cannot easily tell which explanations were verified or resolved.
 
-## Architecture
+## The Solution
+
+DoubtDesk organizes study discussions into **subject rooms** where:
+1. **Every doubt has a lifecycle:** Questions start as `open` and are marked `solved` when resolved by the asker.
+2. **Instant AI first response:** Gemini AI generates a concise, verified first answer within seconds, citing that students should verify with peers or teachers.
+3. **Peer collaboration in real time:** Classmates reply in threaded context with live WebSocket updates.
+4. **Permanent Answer Bank:** Every resolved question feeds a searchable room knowledge base that students can filter and reference across semesters.
+
+---
+
+## Screenshots
+
+| Desktop Study Room (Dark) | Desktop Answer Bank (Dark) |
+| :---: | :---: |
+| ![Desktop Study Room](screenshots/desktop-busy-room-dark.png) | ![Desktop Answer Bank](screenshots/desktop-answer-bank-dark.png) |
+
+| Mobile Study Room | Mobile Answer Bank |
+| :---: | :---: |
+| ![Mobile Study Room](screenshots/mobile-busy-room-dark.png) | ![Mobile Answer Bank](screenshots/mobile-answer-bank-dark.png) |
+
+---
+
+## How We Use the Nexconn SDK
+
+DoubtDesk integrates the official **Nexconn Chat SDK** (`@nexconn/chat-sdk` connecting to the Singapore data center) and Server APIs strictly according to specifications:
+
+1. **Client Engine Initialization & Connection:**
+   - `NCEngine.initialize({ appKey })` is called once on boot.
+   - Handlers (`ConnectionStatusHandler`, `MessageHandler`) are registered *before* `NCEngine.connect({ token })`.
+   - Automatic background reconnection handles network drops.
+
+2. **Group Channels (`GroupChannel`):**
+   - **Creation:** `GroupChannel.createGroup` or backend Server API `/v4/group-channel/create` with `permissions: { joinPerm: 1 }` so any student with the room code can enter.
+   - **Joining:** `new GroupChannel(id).join()` allows students to join public subject rooms.
+   - **Sending:** `new GroupChannel(id).sendMessage(new SendTextMessageParams({ text, metadata }))` posts doubts and replies.
+
+3. **Real-time Message & Event Handling (`MessageHandler`):**
+   - `onMessageReceived` captures incoming doubts and peer replies across active channels without polling.
+   - `onMessageMetadataUpdated` streams real-time status transitions (e.g., when an asker marks a doubt as `solved`), updating peer views instantly.
+
+4. **Message History Query (`BaseChannel.createMessagesQuery`):**
+   - Loads paginated room history on entrance and powers the search index.
+   - Orders messages by server-authoritative `sentTime`.
+
+5. **Message Metadata for Question Lifecycle:**
+   - Doubt model: `kind: 'doubt'`, `status: 'open'` | `'solved'`.
+   - Reply model: `kind: 'reply'`, `replyTo: <messageId>`, optional `author: 'ai'`.
+   - Asker updates metadata via `message.setMetadata({ status: 'solved' })`.
+   - History metadata maps are converted via `Object.fromEntries(message.metadata)`.
+
+6. **Secure Server API Token Issuance:**
+   - Client never holds the `NEXCONN_APP_SECRET`.
+   - The backend issues tokens via `POST https://api.sg-light-api.com/v4/auth/access-token/issue` (with automatic failover to `api-b.sg-light-api.com`), signing requests with SHA1(`AppSecret + Nonce + Timestamp`).
+   - Generates deterministic, collision-resistant student IDs based on HMAC-SHA256 of display names.
+
+---
+
+## Architecture Overview
 
 ```text
-React + TypeScript (Vite)
-  ├─ Nexconn Chat SDK ── group rooms, messages, metadata, live events, history
-  └─ /api/login ───────── Vercel Function / local API
-     /api/rooms/create ── signed Nexconn Server API call
-     /api/ask ─────────── Gemini API with a fast-model fallback
+React 18 + TypeScript (Vite)
+  │
+  ├── Nexconn Chat SDK (Client)
+  │     ├── GroupChannel (rooms, joins, messages)
+  │     ├── BaseChannel.createMessagesQuery (history)
+  │     └── MessageHandler (real-time messages & metadata updates)
+  │
+  └── Serverless API (Node.js / Vercel Functions / server.mjs)
+        ├── POST /api/login          ──> Issues Nexconn token via Server API + signed HMAC session
+        ├── POST /api/rooms/create   ──> Creates open group channel via Nexconn Server API
+        ├── POST /api/ask            ──> Gemini API with fast-model fallback and rate limiting
+        └── GET  /api/health         ──> Health and configuration check
 ```
 
-The Nexconn App Secret and Gemini key are used only by the backend. The browser receives a Nexconn access token to connect and a short-lived signed session token for authorized room creation. Only the display name and room list are kept in `sessionStorage`; the theme preference is stored in `localStorage`.
+- **Security & Privacy:**
+  - Secrets (`NEXCONN_APP_SECRET`, `GEMINI_API_KEY`) reside exclusively in server environment variables.
+  - Session tokens use HMAC-SHA256 signatures with 12-hour expiration, verified on every protected API call.
+  - Strict CORS origin validation accepts same-origin requests and configured domains.
+  - User-submitted text is always escaped and rendered as text nodes to prevent XSS.
 
-### Nexconn features used
+---
 
-- Group channels for subject rooms and peer invitations.
-- Message metadata for doubt/reply type, reply links, AI authorship, and solved status.
-- Real-time message and metadata events to refresh other connected clients.
-- Channel message history for the room board and answer bank.
-- Group creation through the documented Server API with `joinPerm: 1`, so anyone with the room code can join.
+## Local Development
 
-## Run locally
+### Requirements
+- Node.js 20+
+- Nexconn App Key and Secret (Singapore cluster)
+- Google Gemini API Key
 
-Requirements: Node.js 20+ and a Nexconn app in the Singapore data center.
+### Setup Instructions
 
-1. Copy `.env.example` to `.env` and set `VITE_NEXCONN_APP_KEY`.
-2. Copy `.env.server.example` to `.env.server`. Set `NEXCONN_APP_KEY`, `NEXCONN_APP_SECRET`, and `GEMINI_API_KEY`; keep the real file out of Git.
-3. Install and build:
-
+1. Clone the repository:
    ```sh
-   npm install
-   npm run build
-   npm test
+   git clone https://github.com/avomaly/doubtdesk.git
+   cd doubtdesk
    ```
 
-4. Start the API and frontend together:
+2. Configure environment files:
+   - Copy `.env.example` to `.env`:
+     ```env
+     VITE_NEXCONN_APP_KEY=your_nexconn_app_key
+     ```
+   - Copy `.env.server.example` to `.env.server`:
+     ```env
+     NEXCONN_APP_KEY=your_nexconn_app_key
+     NEXCONN_APP_SECRET=your_nexconn_app_secret
+     GEMINI_API_KEY=your_gemini_api_key
+     GEMINI_MODEL=gemini-3.5-flash-lite
+     CORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+     ```
 
+3. Install dependencies and run tests:
+   ```sh
+   npm install
+   npm test
+   npm run build
+   ```
+
+4. Start both backend API and Vite frontend:
    ```sh
    npm run dev:all
    ```
+   Open `http://127.0.0.1:5173` in your browser.
 
-5. Open `http://127.0.0.1:5173`, sign in with a display name, create a subject room or join a room code, then post a doubt.
+---
 
-Gemini defaults to `gemini-3.5-flash-lite`; set `GEMINI_MODEL` in `.env.server` to use another model. The backend retries transient API errors, timeouts, and incomplete generations with `gemini-3.6-flash` under a 9-second total request budget. It returns only complete answers, limits them to 110 words, and adds a reminder to confirm with a senior or teacher. AI failure never prevents the doubt from being posted.
+## Demo Presets & Reset Script
 
-## Rooms and sharing
+DoubtDesk comes pre-configured with default subject rooms:
+- **Physics 101:** `physics101`
+- **Chemistry 101:** `chemistry101`
+- **Calculus 101:** `calculus101`
 
-Room codes use letters and numbers (up to 64 characters). The sidebar includes Physics 101, Chemistry 101, and Calculus 101 presets. Creating a room returns a shareable link containing its code; friends can sign in and join from that link or paste the code.
+To reset or clear demo room channels via the Nexconn Server API, run:
+```sh
+node --env-file=.env --env-file=.env.server scripts/reset-demo.mjs
+```
 
-## Deploy on Vercel
+---
 
-1. Create a **public GitHub repository** and push this project. Do not upload `.env`, `.env.server`, or any real API key. The workspace currently needs Git initialization before it can be pushed.
-2. Import the GitHub repository into Vercel. Use the repository root, the default Vite build command `npm run build`, and output directory `dist`.
-3. Add these Vercel **Project → Settings → Environment Variables** for Production (and Preview only if you intend to use Preview deployments):
+## License
 
-   | Variable | Value | Visibility |
-   | --- | --- | --- |
-   | `VITE_NEXCONN_APP_KEY` | Nexconn App Key | Public build variable |
-   | `NEXCONN_APP_KEY` | Same Nexconn App Key | Server only |
-   | `NEXCONN_APP_SECRET` | Nexconn App Secret | Server only; never use a `VITE_` prefix |
-   | `GEMINI_API_KEY` | Google AI Studio API key | Server only |
-   | `GEMINI_MODEL` | `gemini-3.5-flash-lite` (optional) | Server only |
-   | `CORS_ORIGIN` | Exact deployed origin, e.g. `https://your-project.vercel.app` | Server only |
-
-   Leave `VITE_API_BASE_URL` unset/empty; production calls the same-origin `/api/*` functions. For local `node server.mjs`, `.env.server` can include both localhost origins as shown in the example.
-
-4. Redeploy after setting environment variables. Test a new display-name sign-in, room creation, joining from a second browser, an AI answer, and solving/searching a doubt.
-5. Use the production URL as the live app link in the challenge submission. Record the demo script below, and publish the video and write-up alongside the public repository.
-
-The API has input bounds and process-local per-IP rate limits (10 logins, 10 room creates, and 20 AI requests per minute). Set `CORS_ORIGIN` to the exact deployed origin; do not use `*`. Serverless rate counters are best-effort per function instance, not a distributed abuse-prevention service.
-
-## Screenshot
-
-Add a current app screenshot here before submitting: `![DoubtDesk room and answer bank](docs/screenshots/doubtdesk.png)`.
-
-## Build challenge write-up outline
-
-- **Problem:** class-chat questions get buried and solved explanations are hard to reuse.
-- **Solution:** subject rooms where each doubt has a reply thread, an explicit open/solved lifecycle, and a searchable answer bank.
-- **Innovation:** chat is organized around a question lifecycle, with an AI first responder to reduce wait time and peers/seniors to add trusted context.
-- **Architecture:** React + TypeScript, Nexconn group channels/realtime/history/metadata, a small server API for signed Nexconn operations, and Gemini for first answers.
-- **Growth:** pilot in one college, then expand campus by campus. Keep the student tier free; offer paid administration, analytics, and support plans to colleges and coaching institutes.
-
-## Two-minute demo script
-
-1. **0:00–0:15 — Set the scene:** Open a fresh subject room and explain that doubts should not vanish in a scrolling group chat.
-2. **0:15–0:40 — Ask:** Post a concise question. Show it appear in Open and point out that it remains visible while help arrives.
-3. **0:40–1:05 — AI first answer:** Show the AI badge and concise response, including its confirmation note.
-4. **1:05–1:25 — Peer help:** Reply as a second student/browser and show the threaded answer appear live.
-5. **1:25–1:40 — Resolve:** Return as the asker and mark the doubt solved.
-6. **1:40–2:00 — Reuse:** Open Solved, search a phrase from the question or replies, and share the room link.
-
-## Before submission
-
-- Capture the screenshot after deploying and replace the screenshot placeholder above.
-- Record and publish the two-minute demo video.
-- Add the live Vercel URL and public repository URL to the challenge submission.
-- No Git metadata is present in the supplied workspace, so commit-history secret scanning cannot be verified here. Before publishing, initialize/push a clean repository and scan its complete history for credentials.
+MIT
