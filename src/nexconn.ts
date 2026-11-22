@@ -44,9 +44,14 @@ function notify() {
   activityListeners.forEach((fn) => fn());
 }
 
-export function initNexconn() {
+export function initNexconn(overrideKey?: string) {
   if (initialized) return;
-  NCEngine.initialize({ appKey: import.meta.env.VITE_NEXCONN_APP_KEY });
+  const appKey =
+    overrideKey ||
+    (typeof window !== 'undefined' ? window.sessionStorage?.getItem('doubtdesk.appKey') : null) ||
+    import.meta.env.VITE_NEXCONN_APP_KEY;
+  if (!appKey) return;
+  NCEngine.initialize({ appKey });
 
   NCEngine.addConnectionStatusHandler(
     'doubtdesk',
@@ -85,8 +90,8 @@ export function initNexconn() {
   initialized = true;
 }
 
-export function connectUser(token: string): Promise<string> {
-  initNexconn();
+export function connectUser(token: string, overrideKey?: string): Promise<string> {
+  initNexconn(overrideKey);
   if (connectingPromise && currentToken === token) {
     return connectingPromise;
   }

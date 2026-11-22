@@ -65,7 +65,7 @@ export async function checkAPI(): Promise<boolean> {
 
 export async function loginUser(
   name: string,
-): Promise<{ userId: string; accessToken: string; sessionToken: string }> {
+): Promise<{ userId: string; accessToken: string; sessionToken: string; appKey?: string }> {
   const body = await postAPI('/api/login', { name });
   if (
     !body ||

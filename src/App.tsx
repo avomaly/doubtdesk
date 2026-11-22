@@ -294,6 +294,7 @@ function App() {
     sessionStorage.removeItem('doubtdesk.userId');
     sessionStorage.removeItem('doubtdesk.token');
     sessionStorage.removeItem('doubtdesk.session');
+    sessionStorage.removeItem('doubtdesk.appKey');
     setMe('');
     setApiSession('');
     setDisplayName('');
@@ -331,7 +332,8 @@ function App() {
     const token = sessionStorage.getItem('doubtdesk.token');
     const savedUserId = sessionStorage.getItem('doubtdesk.userId');
     if (token && savedUserId) {
-      connectUser(token).catch((err) => {
+      const savedKey = sessionStorage.getItem('doubtdesk.appKey') || undefined;
+      connectUser(token, savedKey).catch((err) => {
         console.warn('Auto-reconnect on reload failed:', err);
         if (String(err).includes('expired') || String(err).includes('31020')) {
           void signOut();
@@ -512,8 +514,11 @@ function App() {
       if (authenticating) return;
       setAuthenticating(true);
       try {
-        const { userId, accessToken, sessionToken } = await loginUser(name);
-        const id = await connectUser(accessToken);
+        const { userId, accessToken, sessionToken, appKey } = await loginUser(name);
+        if (appKey) {
+          sessionStorage.setItem('doubtdesk.appKey', appKey);
+        }
+        const id = await connectUser(accessToken, appKey);
         if (id !== userId) throw new Error('Could not confirm your Nexconn account. Sign in again.');
         sessionStorage.setItem('doubtdesk.name', name);
         sessionStorage.setItem('doubtdesk.userId', id);
